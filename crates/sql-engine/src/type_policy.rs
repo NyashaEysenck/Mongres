@@ -7,19 +7,18 @@ use crate::{Predicate, SqlValue};
 
 /// Validates values used to select documents for a write.
 ///
-/// A type or shape ambiguity must be resolved before a write can use it as a
-/// filter, because changing the filter's BSON type can change which documents
-/// are modified or deleted.
+/// Ambiguity is reported by the policy layer after lowering; this module still
+/// rejects every clear, incompatible literal before it reaches the executor.
 pub(crate) fn validate_write_predicate(
     predicate: &Predicate,
     schema: &SchemaProfile,
 ) -> Result<(), ProxyError> {
     match predicate {
-        Predicate::Compare { path, value, .. } => validate_value(path, value, schema, false, true),
+        Predicate::Compare { path, value, .. } => validate_value(path, value, schema, false),
         Predicate::In { path, values, .. } => values
             .iter()
-            .try_for_each(|value| validate_value(path, value, schema, false, true)),
-        Predicate::IsNull { path, .. } => validate_field_shape(path, schema, true).map(|_| ()),
+            .try_for_each(|value| validate_value(path, value, schema, false)),
+        Predicate::IsNull { path, .. } => validate_field_shape(path, schema).map(|_| ()),
         Predicate::And(predicates) | Predicate::Or(predicates) => predicates
             .iter()
             .try_for_each(|predicate| validate_write_predicate(predicate, schema)),
@@ -37,23 +36,22 @@ pub(crate) fn validate_write_value(
     value: &SqlValue,
     schema: &SchemaProfile,
 ) -> Result<(), ProxyError> {
-    validate_value(path, value, schema, true, true)
+    validate_value(path, value, schema, true)
 }
 
 /// Validates values used in a read predicate.
 ///
-/// Ambiguous fields are rejected as invalid input for reads; they are never
-/// sent to the write-time resolver.
+/// Ambiguous fields remain readable, but their values are not coerced.
 pub(crate) fn validate_read_predicate(
     predicate: &Predicate,
     schema: &SchemaProfile,
 ) -> Result<(), ProxyError> {
     match predicate {
-        Predicate::Compare { path, value, .. } => validate_value(path, value, schema, false, false),
+        Predicate::Compare { path, value, .. } => validate_value(path, value, schema, false),
         Predicate::In { path, values, .. } => values
             .iter()
-            .try_for_each(|value| validate_value(path, value, schema, false, false)),
-        Predicate::IsNull { path, .. } => validate_field_shape(path, schema, false).map(|_| ()),
+            .try_for_each(|value| validate_value(path, value, schema, false)),
+        Predicate::IsNull { path, .. } => validate_field_shape(path, schema).map(|_| ()),
         Predicate::And(predicates) | Predicate::Or(predicates) => predicates
             .iter()
             .try_for_each(|predicate| validate_read_predicate(predicate, schema)),
@@ -65,7 +63,6 @@ fn validate_value(
     value: &SqlValue,
     schema: &SchemaProfile,
     null_is_allowed: bool,
-    ambiguity_blocks_operation: bool,
 ) -> Result<(), ProxyError> {
     if matches!(value, SqlValue::Placeholder(_)) {
         // Typed protocol binding owns validation when placeholders become
@@ -82,7 +79,9 @@ fn validate_value(
         };
     }
 
-    let observed_type = validate_field_shape(path, schema, ambiguity_blocks_operation)?;
+    let Some(observed_type) = validate_field_shape(path, schema)? else {
+        return Ok(());
+    };
     if !is_compatible(value, observed_type) {
         return Err(invalid_input(format!(
             "value for field '{}' is not compatible with inferred BSON type '{}'",
@@ -96,8 +95,7 @@ fn validate_value(
 fn validate_field_shape(
     path: &FieldPath,
     schema: &SchemaProfile,
-    ambiguity_blocks_operation: bool,
-) -> Result<ObservedType, ProxyError> {
+) -> Result<Option<ObservedType>, ProxyError> {
     let profile = schema.field(path).ok_or_else(|| {
         invalid_input(format!(
             "field '{}' is not present in the active schema profile",
@@ -115,17 +113,9 @@ fn validate_field_shape(
         || profile.observed_shapes.len() != 1
         || non_null_types.len() != 1
     {
-        let error = format!(
-            "field '{}' has an ambiguous inferred type or shape",
-            path.display_name()
-        );
-        return if ambiguity_blocks_operation {
-            Err(ProxyError::new(ErrorKind::AmbiguousWrite, error))
-        } else {
-            Err(invalid_input(error))
-        };
+        return Ok(None);
     }
-    Ok(non_null_types[0])
+    Ok(Some(non_null_types[0]))
 }
 
 fn is_compatible(value: &SqlValue, observed_type: ObservedType) -> bool {

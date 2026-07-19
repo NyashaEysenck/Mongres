@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/ambiguity-policy",
     "crates/catalog",
     "crates/common",
     "crates/mongo-executor",
@@ -21,4 +22,3 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
-

@@ -63,8 +63,8 @@ This is the living progress record for the project. Completed items are checked 
 
 ## Phase 6 — Write-time ambiguity resolution
 
-- [ ] Implement a deterministic write ambiguity detector using schema profiles.
-- [ ] Define the Rust allowlist for resolver decisions.
+- [x] Implement a deterministic write ambiguity detector using schema profiles.
+- [x] Define the Rust allowlist for resolver decisions.
 - [ ] Implement resolver request handling, model adapter, timeout, and confidence policy.
 - [ ] Validate every resolver response in Rust before execution.
 - [ ] Ensure clear writes never invoke the resolver.

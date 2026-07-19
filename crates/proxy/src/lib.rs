@@ -8,6 +8,7 @@ use std::{env, fmt::Debug, sync::Arc};
 
 use async_trait::async_trait;
 use futures_util::{Sink, StreamExt, stream};
+use mongo_pg_ambiguity_policy::{detect_write_ambiguities, unresolved_write_error};
 use mongo_pg_catalog::{CollectionCatalog, SqlType, project_public_collection};
 use mongo_pg_common::{ErrorKind, ProxyError};
 use mongo_pg_mongo_executor::{
@@ -166,6 +167,10 @@ impl ProxyBackend {
             plan @ (StatementPlan::Insert(_)
             | StatementPlan::Update(_)
             | StatementPlan::Delete(_)) => {
+                let ambiguities = detect_write_ambiguities(&plan, &self.schema)?;
+                if !ambiguities.is_empty() {
+                    return Err(unresolved_write_error(&ambiguities));
+                }
                 let outcome = execute_write(&self.database, &plan).await?;
                 Ok(ExecutionResult::Command(command_result(&plan, outcome)))
             }
@@ -690,7 +695,8 @@ impl ExtendedQueryHandler for ProxyBackend {
 mod tests {
     use std::collections::BTreeMap;
 
-    use mongo_pg_schema_discovery::{SampleDocument, SampleValue};
+    use mongo_pg_common::ErrorKind;
+    use mongo_pg_schema_discovery::{SampleDocument, SampleValue, SchemaProfile};
 
     use super::{ProxyBackend, WireValue, bson_to_wire_value};
 
@@ -732,5 +738,34 @@ mod tests {
             ),
             WireValue::Text(r#"{"city":"Harare"}"#.to_owned())
         );
+    }
+
+    #[tokio::test]
+    async fn blocks_ambiguous_writes_before_calling_mongodb() {
+        let profile = SchemaProfile::infer(&[
+            document([
+                ("name", SampleValue::String("Amina".to_owned())),
+                ("status", SampleValue::Integer(1)),
+            ]),
+            document([
+                ("name", SampleValue::String("Tendai".to_owned())),
+                ("status", SampleValue::String("active".to_owned())),
+            ]),
+        ]);
+        let backend = ProxyBackend::new(
+            mongodb::Client::with_uri_str("mongodb://localhost:27017")
+                .await
+                .expect("valid URI")
+                .database("demo"),
+            "demo".to_owned(),
+            "customers".to_owned(),
+            profile,
+        );
+
+        let error = backend
+            .execute("UPDATE customers SET status = 2 WHERE name = 'Amina'")
+            .await
+            .expect_err("ambiguous write must not reach MongoDB");
+        assert_eq!(error.kind, ErrorKind::AmbiguousWrite);
     }
 }

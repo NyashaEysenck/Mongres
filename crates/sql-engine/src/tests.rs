@@ -160,7 +160,7 @@ fn enforces_exact_inferred_types_for_write_values_and_filters() {
 }
 
 #[test]
-fn fails_closed_for_ambiguous_write_fields() {
+fn preserves_ambiguous_write_fields_for_the_policy_layer() {
     let mut ambiguous_schema = schema();
     let status = ambiguous_schema
         .fields
@@ -169,11 +169,11 @@ fn fails_closed_for_ambiguous_write_fields() {
         .expect("status field must exist in fixture");
     status.observed_types.insert(ObservedType::String);
 
-    let error = parse_sql(
+    let plan = parse_sql(
         "UPDATE customers SET status = 2 WHERE name = 'Amina'",
         "customers",
         &ambiguous_schema,
     )
-    .expect_err("ambiguous fields must not receive a write before resolution");
-    assert_eq!(error.kind, ErrorKind::AmbiguousWrite);
+    .expect("the policy layer must receive the typed ambiguous write plan");
+    assert!(matches!(plan, StatementPlan::Update(_)));
 }

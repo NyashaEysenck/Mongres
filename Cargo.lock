@@ -1209,6 +1209,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mongo-pg-ambiguity-policy"
+version = "0.1.0"
+dependencies = [
+ "mongo-pg-common",
+ "mongo-pg-schema-discovery",
+ "mongo-pg-sql-engine",
+]
+
+[[package]]
 name = "mongo-pg-catalog"
 version = "0.1.0"
 dependencies = [
@@ -1238,6 +1247,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
+ "mongo-pg-ambiguity-policy",
  "mongo-pg-catalog",
  "mongo-pg-common",
  "mongo-pg-mongo-executor",

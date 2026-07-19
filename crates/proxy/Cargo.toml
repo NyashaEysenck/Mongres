@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait = "0.1"
 futures-util = "0.3"
+mongo-pg-ambiguity-policy = { path = "../ambiguity-policy" }
 mongo-pg-catalog = { path = "../catalog" }
 mongo-pg-common = { path = "../common" }
 mongo-pg-mongo-executor = { path = "../mongo-executor" }
