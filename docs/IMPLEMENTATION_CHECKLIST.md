@@ -2,7 +2,7 @@
 
 This is the living progress record for the project. Completed items are checked only after their relevant quality checks pass.
 
-**Current focus:** Phase 5 — catalog projections and PostgreSQL protocol support.
+**Current focus:** Phase 6 — write-time ambiguity detection and constrained resolution.
 
 ## Phase 1 — Foundation and reproducible development environment
 
@@ -52,13 +52,13 @@ This is the living progress record for the project. Completed items are checked 
 
 ## Phase 5 — PostgreSQL protocol and catalog
 
-- [ ] Build catalog projections from schema profiles for collections and columns.
-- [ ] Implement minimal `pg_catalog` and `information_schema` responses.
-- [ ] Add PostgreSQL type/OID mappings and result-row encoding.
-- [ ] Implement startup, authentication, and session handling with `pgwire`.
-- [ ] Implement simple-query dispatch from the wire protocol to SQL plans/executor.
-- [ ] Return PostgreSQL row descriptions, command completion, and SQLSTATE errors.
-- [ ] Verify `psql` table listing, column inspection, reads, and writes.
+- [x] Build catalog projections from schema profiles for collections and columns.
+- [x] Implement minimal `pg_catalog` and `information_schema` responses.
+- [x] Add PostgreSQL type/OID mappings and text result-row encoding.
+- [x] Implement trust/no-op startup authentication and per-session handling with `pgwire`.
+- [x] Implement simple-query dispatch from the wire protocol to SQL plans/executor.
+- [x] Return PostgreSQL row descriptions, command completion, and SQLSTATE errors.
+- [x] Verify `psql` table listing, column inspection, reads, nested writes, and affected-row tags against local MongoDB.
 - [ ] Verify one standard PostgreSQL driver and DBeaver catalog inspection.
 
 ## Phase 6 — Write-time ambiguity resolution

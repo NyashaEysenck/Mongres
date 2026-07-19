@@ -10,7 +10,7 @@ use std::error::Error;
 use futures_util::TryStreamExt;
 use mongodb::{
     Client, Database,
-    bson::{Bson, Document, doc, to_document},
+    bson::{Bson, Document, doc, from_document, to_document},
 };
 use serde::{Deserialize, Serialize};
 
@@ -259,6 +259,32 @@ pub async fn persist_profile(
         .await?;
 
     Ok(())
+}
+
+/// Loads the most recently persisted schema profile for one collection.
+///
+/// # Errors
+///
+/// Returns an error when the metadata record cannot be read or decoded. A
+/// missing record is represented as `Ok(None)` so callers can distinguish a
+/// first-run setup problem from an unavailable `MongoDB` instance.
+pub async fn load_persisted_profile(
+    database: &Database,
+    source_collection: &str,
+) -> DiscoveryResult<Option<SchemaProfile>> {
+    let metadata = database.collection::<Document>(METADATA_COLLECTION);
+    let record = metadata
+        .find_one(doc! {
+            "database": database.name(),
+            "collection": source_collection,
+        })
+        .await?;
+
+    record
+        .map(from_document::<StoredSchemaProfile>)
+        .transpose()
+        .map(|stored| stored.map(|record| record.profile))
+        .map_err(Into::into)
 }
 
 /// Converts a driver document into the pure input model used by inference.

@@ -4,12 +4,50 @@ A Rust proxy that exposes MongoDB through the PostgreSQL wire protocol, with det
 
 ## Current status
 
-The project foundation is in place. No database protocol or MongoDB behavior has been implemented yet.
+The MVP has schema discovery, typed SQL lowering, deterministic MongoDB CRUD,
+schema-backed catalog projection, and a PostgreSQL wire-protocol server. The
+server currently uses trust/no-op authentication and supports PostgreSQL text
+results. Write-time ambiguity resolution and external GUI/driver validation
+remain next.
 
 ## Local development
 
 ```bash
 cargo test --workspace
+```
+
+## Run the local protocol proof
+
+First discover and persist a profile for the collection you want to expose:
+
+```bash
+MONGO_URI=mongodb://localhost:27017 \
+MONGO_DATABASE=demo \
+MONGO_COLLECTION=customers \
+cargo run -p mongo-pg-schema-discovery
+```
+
+Then start the proxy and connect with any client that supports PostgreSQL's
+simple-query protocol:
+
+```bash
+MONGO_URI=mongodb://localhost:27017 \
+MONGO_DATABASE=demo \
+MONGO_COLLECTION=customers \
+PROXY_LISTEN_ADDR=127.0.0.1:5433 \
+cargo run -p mongo-pg-proxy
+
+psql 'postgresql://localhost:5433/demo?sslmode=disable'
+```
+
+Within `psql`, `\dt`, `information_schema.columns`, and the supported
+`SELECT`/`INSERT`/`UPDATE`/`DELETE` subset work against the active MongoDB
+collection. Quote nested field names in an `INSERT` column list because the
+PostgreSQL grammar accepts each column there as one identifier:
+
+```sql
+INSERT INTO customers (name, "profile.address.city")
+VALUES ('Amina', 'Harare');
 ```
 
 Project goals, scope, implementation phases, acceptance criteria, engineering standards, the live [implementation checklist](docs/IMPLEMENTATION_CHECKLIST.md), and [write semantics](docs/WRITE_SEMANTICS.md) are in [docs](docs/).

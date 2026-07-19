@@ -252,7 +252,7 @@ fn parse_insert(
     let columns = insert
         .columns
         .iter()
-        .map(|column| resolve_field(std::slice::from_ref(column), &collection, schema))
+        .map(|column| resolve_insert_column(column, &collection, schema))
         .collect::<Result<Vec<_>, _>>()?;
     let source = insert
         .source
@@ -565,6 +565,38 @@ fn resolve_field(
     Ok(path)
 }
 
+/// Resolves one `INSERT` column name.
+///
+/// The `PostgreSQL` grammar represents an `INSERT` column list as individual
+/// identifiers, unlike SELECT expressions and UPDATE assignment targets. A
+/// nested `MongoDB` path therefore arrives as one quoted identifier (for
+/// example, `"profile.address.city"`). Interpret that form as segments only
+/// when it matches a discovered nested path; an exact literal dotted key still
+/// wins when it is the only matching field.
+fn resolve_insert_column(
+    identifier: &Ident,
+    collection: &str,
+    schema: &SchemaProfile,
+) -> Result<FieldPath, ProxyError> {
+    let exact = FieldPath::top_level(&identifier.value);
+    if schema.field(&exact).is_some() {
+        return Ok(exact);
+    }
+    let segments = identifier.value.split('.').collect::<Vec<_>>();
+    let Some((first, rest)) = segments.split_first() else {
+        return Err(invalid_input("field path cannot be empty"));
+    };
+    let path = rest
+        .iter()
+        .fold(FieldPath::top_level(*first), |path, segment| {
+            path.child(*segment)
+        });
+    if schema.field(&path).is_some() {
+        return Ok(path);
+    }
+    resolve_field(std::slice::from_ref(identifier), collection, schema)
+}
+
 fn invalid_input(message: impl Into<String>) -> ProxyError {
     ProxyError::new(ErrorKind::InvalidInput, message)
 }
@@ -645,6 +677,17 @@ mod tests {
         assert!(matches!(
             insert,
             StatementPlan::Insert(plan) if plan.rows.len() == 2 && plan.rows[0][0] == SqlValue::String("Amina".into())
+        ));
+
+        let nested_insert = parse_sql(
+            "INSERT INTO customers (name, \"profile.city\") VALUES ('Amina', 'Harare')",
+            "customers",
+            &schema(),
+        )
+        .expect("quoted nested INSERT column should parse");
+        assert!(matches!(
+            nested_insert,
+            StatementPlan::Insert(plan) if plan.columns[1] == FieldPath::top_level("profile").child("city")
         ));
 
         let update = parse_sql(
