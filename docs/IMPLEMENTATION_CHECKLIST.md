@@ -2,7 +2,7 @@
 
 This is the living progress record for the project. Completed items are checked only after their relevant quality checks pass.
 
-**Current focus:** Phase 4 — deterministic nested `UPDATE` execution.
+**Current focus:** Phase 5 — catalog projections and PostgreSQL protocol support.
 
 ## Phase 1 — Foundation and reproducible development environment
 
@@ -42,13 +42,13 @@ This is the living progress record for the project. Completed items are checked 
 - [x] Add a live integration test for nested `SELECT` filters and projections.
 - [x] Translate typed `INSERT` plans into validated BSON documents and insert calls.
 - [x] Add a live integration test for a persisted nested `INSERT` and inserted-row count.
-- [ ] Translate typed `UPDATE` plans into safe nested `$set` operations.
-- [ ] Translate typed `DELETE` plans into validated delete calls.
-- [ ] Map SQL values and prepared-statement parameters to BSON without silent lossy coercion.
-- [ ] Return actual matched, modified, inserted, and deleted counts.
-- [ ] Map MongoDB and partial-write failures to PostgreSQL-compatible errors.
-- [ ] Add live integration tests for filters, nested writes, row counts, and failure paths.
-- [ ] Define and test retry/write-concern behavior.
+- [x] Translate typed `UPDATE` plans into safe nested `$set` operations.
+- [x] Translate typed `DELETE` plans into validated delete calls.
+- [x] Map SQL values to BSON without silent lossy coercion; reject unbound parameters until typed protocol binding exists.
+- [x] Return actual matched, modified, inserted, and deleted counts.
+- [x] Map MongoDB and partial-write failures to proxy errors backed by PostgreSQL SQLSTATEs.
+- [x] Add live integration tests for filters, nested writes, row counts, no-match behavior, and duplicate-key failures.
+- [x] Define and test no-retry/majority-write-concern behavior.
 
 ## Phase 5 — PostgreSQL protocol and catalog
 

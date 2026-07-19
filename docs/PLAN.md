@@ -1,6 +1,7 @@
 # Implementation Plan
 
 Current implementation status is tracked in [IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md).
+Deterministic write behavior is specified in [WRITE_SEMANTICS.md](WRITE_SEMANTICS.md).
 
 ## Phase 1: Foundation and reproducible environment
 

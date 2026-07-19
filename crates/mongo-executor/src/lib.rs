@@ -6,11 +6,13 @@
 use futures_util::TryStreamExt;
 use mongo_pg_common::{ErrorKind, ProxyError};
 use mongo_pg_sql_engine::{
-    ComparisonOperator, InsertPlan, Predicate, Projection, SelectPlan, SqlValue, StatementPlan,
+    AssignmentPlan, ComparisonOperator, DeletePlan, InsertPlan, Predicate, Projection, SelectPlan,
+    SqlValue, StatementPlan, UpdatePlan,
 };
 use mongodb::{
-    Database,
+    Client, Database,
     bson::{Bson, Document},
+    options::{ClientOptions, WriteConcern},
 };
 
 /// Counts returned from a completed `MongoDB` write.
@@ -20,6 +22,30 @@ pub struct WriteOutcome {
     pub modified: u64,
     pub inserted: u64,
     pub deleted: u64,
+}
+
+/// Applies the required policy for deterministic proxy writes.
+///
+/// The proxy does not reissue writes itself. Driver retryable writes are
+/// disabled so a network ambiguity is returned to the caller rather than
+/// silently re-executing a potentially non-idempotent statement.
+pub fn apply_deterministic_write_policy(options: &mut ClientOptions) {
+    options.retry_writes = Some(false);
+    options.write_concern = Some(WriteConcern::majority());
+}
+
+/// Creates a `MongoDB` client configured for deterministic proxy writes.
+///
+/// # Errors
+///
+/// Returns a dependency error when the connection string cannot be parsed or
+/// the configured client cannot be created.
+pub async fn deterministic_write_client(uri: &str) -> Result<Client, ProxyError> {
+    let mut options = ClientOptions::parse(uri)
+        .await
+        .map_err(|error| client_configuration_error(&error))?;
+    apply_deterministic_write_policy(&mut options);
+    Client::with_options(options).map_err(|error| client_configuration_error(&error))
 }
 
 /// Documents returned from a deterministic read execution.
@@ -98,13 +124,13 @@ pub async fn execute_insert(
                     .ok_or_else(|| invalid_input("INSERT requires at least one row"))?,
             )
             .await
-            .map_err(|error| database_error(&error))?;
+            .map_err(|error| write_error(&error))?;
         1
     } else {
         collection
             .insert_many(documents)
             .await
-            .map_err(|error| database_error(&error))?
+            .map_err(|error| write_error(&error))?
             .inserted_ids
             .len() as u64
     };
@@ -115,8 +141,85 @@ pub async fn execute_insert(
     })
 }
 
-/// Refuses plans other than reads until their dedicated deterministic executor
-/// implementation is complete.
+/// Executes a typed `UPDATE` plan with a deterministic `$set` operation.
+///
+/// Every matching document is updated, mirroring SQL `UPDATE` semantics. The
+/// assignment document is constructed only from validated path segments; it
+/// cannot contain overlapping paths, literal dotted keys, or unbound values.
+///
+/// # Errors
+///
+/// Returns an error when the filter or assignments cannot be represented
+/// safely, or when the `MongoDB` driver rejects the operation.
+pub async fn execute_update(
+    database: &Database,
+    plan: &UpdatePlan,
+) -> Result<WriteOutcome, ProxyError> {
+    let filter = predicate_document(&plan.filter)?;
+    let update = update_document(&plan.assignments)?;
+    let collection = database.collection::<Document>(&plan.collection);
+    let result = collection
+        .update_many(filter, update)
+        .await
+        .map_err(|error| write_error(&error))?;
+
+    Ok(WriteOutcome {
+        matched: result.matched_count,
+        modified: result.modified_count,
+        ..WriteOutcome::default()
+    })
+}
+
+/// Executes a typed `DELETE` plan against every matching document.
+///
+/// The SQL layer requires a `WHERE` clause before producing a `DeletePlan`;
+/// this executor still translates only the typed predicate rather than
+/// accepting a caller-supplied `MongoDB` filter.
+///
+/// # Errors
+///
+/// Returns an error when the filter cannot be represented safely or when the
+/// `MongoDB` driver rejects the operation.
+pub async fn execute_delete(
+    database: &Database,
+    plan: &DeletePlan,
+) -> Result<WriteOutcome, ProxyError> {
+    let filter = predicate_document(&plan.filter)?;
+    let collection = database.collection::<Document>(&plan.collection);
+    let result = collection
+        .delete_many(filter)
+        .await
+        .map_err(|error| write_error(&error))?;
+
+    Ok(WriteOutcome {
+        deleted: result.deleted_count,
+        ..WriteOutcome::default()
+    })
+}
+
+/// Executes a typed write plan without applying application-level retries.
+///
+/// # Errors
+///
+/// Returns an unsupported-feature error for `SELECT` plans and forwards the
+/// appropriate deterministic write error for write plans.
+pub async fn execute_write(
+    database: &Database,
+    plan: &StatementPlan,
+) -> Result<WriteOutcome, ProxyError> {
+    match plan {
+        StatementPlan::Insert(insert) => execute_insert(database, insert).await,
+        StatementPlan::Update(update) => execute_update(database, update).await,
+        StatementPlan::Delete(delete) => execute_delete(database, delete).await,
+        StatementPlan::Select(_) => Err(ProxyError::new(
+            ErrorKind::FeatureNotSupported,
+            "SELECT plans must use the read executor",
+        )),
+    }
+}
+
+/// Executes only read plans for callers that intentionally expose a
+/// read-only surface.
 ///
 /// # Errors
 ///
@@ -261,6 +364,55 @@ fn build_insert_document(
     Ok(document)
 }
 
+fn update_document(assignments: &[AssignmentPlan]) -> Result<Document, ProxyError> {
+    if assignments.is_empty() {
+        return Err(invalid_input("UPDATE requires at least one assignment"));
+    }
+
+    let mut set = Document::new();
+    let mut assigned_paths = Vec::with_capacity(assignments.len());
+    for assignment in assignments {
+        let field = mongo_field_name(&assignment.path)?;
+        validate_update_path(&assignment.path, &assigned_paths)?;
+        set.insert(field, bson_value(&assignment.value)?);
+        assigned_paths.push(assignment.path.segments());
+    }
+
+    Ok(single_field("$set", Bson::Document(set)))
+}
+
+fn validate_update_path(
+    path: &mongo_pg_schema_discovery::FieldPath,
+    assigned_paths: &[&[String]],
+) -> Result<(), ProxyError> {
+    let segments = path.segments();
+    if segments.is_empty() || segments.iter().any(String::is_empty) {
+        return Err(invalid_input(
+            "UPDATE field path cannot contain empty segments",
+        ));
+    }
+    if segments.iter().any(|segment| segment.starts_with('$')) {
+        return Err(invalid_input(
+            "UPDATE field path cannot contain MongoDB operator-like segments",
+        ));
+    }
+    if assigned_paths
+        .iter()
+        .any(|other| paths_overlap(segments, other))
+    {
+        return Err(invalid_input(format!(
+            "UPDATE assignment path '{}' conflicts with another assignment path",
+            path.display_name()
+        )));
+    }
+    Ok(())
+}
+
+fn paths_overlap(left: &[String], right: &[String]) -> bool {
+    let common_length = left.len().min(right.len());
+    left[..common_length] == right[..common_length]
+}
+
 fn insert_nested_value(
     document: &mut Document,
     segments: &[String],
@@ -328,14 +480,36 @@ fn database_error(error: &mongodb::error::Error) -> ProxyError {
     )
 }
 
+fn write_error(error: &mongodb::error::Error) -> ProxyError {
+    ProxyError::new(
+        ErrorKind::Database,
+        format!(
+            "MongoDB write failed and may have partially applied; inspect the database before retrying: {error}"
+        ),
+    )
+}
+
+fn client_configuration_error(error: &mongodb::error::Error) -> ProxyError {
+    ProxyError::new(
+        ErrorKind::Dependency,
+        format!("MongoDB client configuration failed: {error}"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use mongo_pg_common::ErrorKind;
     use mongo_pg_schema_discovery::FieldPath;
-    use mongo_pg_sql_engine::{ComparisonOperator, Predicate, SqlValue};
-    use mongodb::bson::{Bson, doc};
+    use mongo_pg_sql_engine::{AssignmentPlan, ComparisonOperator, Predicate, SqlValue};
+    use mongodb::{
+        bson::{Bson, doc},
+        options::{ClientOptions, WriteConcern},
+    };
 
-    use super::{build_insert_document, predicate_document};
+    use super::{
+        apply_deterministic_write_policy, build_insert_document, predicate_document,
+        update_document,
+    };
 
     #[test]
     fn builds_nested_comparison_filters() {
@@ -409,5 +583,59 @@ mod tests {
         )
         .expect_err("a scalar and its nested path cannot be inserted together");
         assert_eq!(error.kind, ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn builds_a_safe_nested_set_update() {
+        let update = update_document(&[
+            AssignmentPlan {
+                path: FieldPath::top_level("profile").child("city"),
+                value: SqlValue::String("Harare".into()),
+            },
+            AssignmentPlan {
+                path: FieldPath::top_level("status"),
+                value: SqlValue::String("active".into()),
+            },
+        ])
+        .expect("non-overlapping paths should form a $set document");
+
+        assert_eq!(
+            update,
+            doc! { "$set": { "profile.city": "Harare", "status": "active" } }
+        );
+    }
+
+    #[test]
+    fn rejects_overlapping_update_paths() {
+        let error = update_document(&[
+            AssignmentPlan {
+                path: FieldPath::top_level("profile"),
+                value: SqlValue::String("not-an-object".into()),
+            },
+            AssignmentPlan {
+                path: FieldPath::top_level("profile").child("city"),
+                value: SqlValue::String("Harare".into()),
+            },
+        ])
+        .expect_err("overlapping assignments must not be sent to MongoDB");
+        assert_eq!(error.kind, ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn rejects_unbound_update_parameters() {
+        let error = update_document(&[AssignmentPlan {
+            path: FieldPath::top_level("status"),
+            value: SqlValue::Placeholder("$1".into()),
+        }])
+        .expect_err("write execution cannot run with an unbound parameter");
+        assert_eq!(error.kind, ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn applies_an_acknowledged_no_retry_write_policy() {
+        let mut options = ClientOptions::default();
+        apply_deterministic_write_policy(&mut options);
+        assert_eq!(options.retry_writes, Some(false));
+        assert_eq!(options.write_concern, Some(WriteConcern::majority()));
     }
 }
