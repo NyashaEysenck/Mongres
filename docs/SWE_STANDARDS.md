@@ -37,6 +37,14 @@ Dependencies must flow inward through typed interfaces. The executor must not pa
 - Avoid `unsafe`; any required use needs a documented safety argument and focused review.
 - Pin or constrain dependency versions and remove unused dependencies promptly.
 
+### DRY (Don't Repeat Yourself)
+
+- Keep each business rule, protocol convention, and safety policy in one authoritative implementation. Call or reuse that implementation; do not copy it into another layer.
+- Extract a shared helper or domain type when duplicate logic represents the same concept—for example, field-path resolution, SQLSTATE mapping, type compatibility, or MongoDB filter construction.
+- Do not create an abstraction for coincidental similarity, a one-line expression, or code whose separate responsibilities are clearer when local. Duplication is preferable to a misleading or over-general abstraction.
+- When changing a rule, search for parallel implementations and either consolidate them or document why their semantics intentionally differ.
+- Tests should exercise shared behavior through its canonical boundary, with focused regression coverage for rules that protect write correctness.
+
 ### Module design and size
 
 - Organize code around cohesive responsibilities and stable interfaces; a module should have one clear reason to change.

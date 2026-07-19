@@ -19,6 +19,7 @@ use crate::{
         parse_predicate, parse_value, resolve_expression_field, resolve_field,
         resolve_insert_column,
     },
+    type_policy::{validate_read_predicate, validate_write_predicate, validate_write_value},
     unsupported_feature,
 };
 
@@ -93,6 +94,9 @@ fn parse_select(
         .as_ref()
         .map(|expression| parse_predicate(expression, &collection, schema))
         .transpose()?;
+    if let Some(predicate) = &filter {
+        validate_read_predicate(predicate, schema)?;
+    }
     let limit = query.limit.as_ref().map(parse_limit).transpose()?;
 
     Ok(StatementPlan::Select(SelectPlan {
@@ -186,7 +190,12 @@ fn parse_insert(
                     "each INSERT VALUES row must match the number of columns",
                 ));
             }
-            row.iter().map(parse_value).collect()
+            let values = row.iter().map(parse_value).collect::<Result<Vec<_>, _>>()?;
+            columns
+                .iter()
+                .zip(&values)
+                .try_for_each(|(path, value)| validate_write_value(path, value, schema))?;
+            Ok(values)
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -230,6 +239,10 @@ fn parse_update(
     let filter = selection
         .ok_or_else(|| invalid_input("UPDATE requires a WHERE clause in the MVP"))
         .and_then(|expression| parse_predicate(expression, &collection, schema))?;
+    for assignment in &assignments {
+        validate_write_value(&assignment.path, &assignment.value, schema)?;
+    }
+    validate_write_predicate(&filter, schema)?;
 
     Ok(StatementPlan::Update(UpdatePlan {
         collection,
@@ -263,6 +276,7 @@ fn parse_delete(
         .as_ref()
         .ok_or_else(|| invalid_input("DELETE requires a WHERE clause in the MVP"))
         .and_then(|expression| parse_predicate(expression, &collection, schema))?;
+    validate_write_predicate(&filter, schema)?;
 
     Ok(StatementPlan::Delete(DeletePlan { collection, filter }))
 }

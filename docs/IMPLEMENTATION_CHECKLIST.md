@@ -34,7 +34,7 @@ This is the living progress record for the project. Completed items are checked 
 - [x] Resolve fields against the discovered schema profile.
 - [x] Return explicit errors for joins, subqueries, aggregation, unsupported modifiers, unknown fields, and unsafe unfiltered writes.
 - [x] Add parser/lowering unit tests for supported and rejected SQL.
-- [ ] Add executor-facing type-coercion policy based on inferred BSON types.
+- [x] Add executor-facing type-coercion policy based on inferred BSON types.
 
 ## Phase 4 — Deterministic MongoDB executor
 

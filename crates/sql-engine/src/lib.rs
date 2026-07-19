@@ -6,6 +6,7 @@
 mod lowering;
 mod plan;
 mod resolve;
+mod type_policy;
 
 pub use lowering::parse_sql;
 pub use plan::{

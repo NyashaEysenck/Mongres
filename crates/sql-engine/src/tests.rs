@@ -120,3 +120,60 @@ fn rejects_unsafe_or_unsupported_sql_before_execution() {
     .expect_err("unknown field should be rejected");
     assert_eq!(unknown_field_error.kind, ErrorKind::InvalidInput);
 }
+
+#[test]
+fn rejects_null_comparisons_that_mongodb_cannot_translate_with_sql_semantics() {
+    for sql in [
+        "SELECT name FROM customers WHERE name = NULL",
+        "SELECT name FROM customers WHERE status IN (1, NULL)",
+    ] {
+        let error = parse_sql(sql, "customers", &schema())
+            .expect_err("NULL comparisons must require IS NULL syntax");
+        assert_eq!(error.kind, ErrorKind::InvalidInput);
+    }
+}
+
+#[test]
+fn enforces_exact_inferred_types_for_write_values_and_filters() {
+    let assignment_error = parse_sql(
+        "UPDATE customers SET active = 'true' WHERE name = 'Amina'",
+        "customers",
+        &schema(),
+    )
+    .expect_err("string values must not coerce to BSON booleans");
+    assert_eq!(assignment_error.kind, ErrorKind::InvalidInput);
+
+    let filter_error = parse_sql(
+        "DELETE FROM customers WHERE status = '2'",
+        "customers",
+        &schema(),
+    )
+    .expect_err("string values must not coerce to BSON integers");
+    assert_eq!(filter_error.kind, ErrorKind::InvalidInput);
+
+    parse_sql(
+        "UPDATE customers SET profile.city = NULL WHERE name = 'Amina'",
+        "customers",
+        &schema(),
+    )
+    .expect("SQL NULL is a valid assignment value");
+}
+
+#[test]
+fn fails_closed_for_ambiguous_write_fields() {
+    let mut ambiguous_schema = schema();
+    let status = ambiguous_schema
+        .fields
+        .iter_mut()
+        .find(|field| field.path == FieldPath::top_level("status"))
+        .expect("status field must exist in fixture");
+    status.observed_types.insert(ObservedType::String);
+
+    let error = parse_sql(
+        "UPDATE customers SET status = 2 WHERE name = 'Amina'",
+        "customers",
+        &ambiguous_schema,
+    )
+    .expect_err("ambiguous fields must not receive a write before resolution");
+    assert_eq!(error.kind, ErrorKind::AmbiguousWrite);
+}
