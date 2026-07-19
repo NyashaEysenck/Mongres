@@ -37,6 +37,15 @@ Dependencies must flow inward through typed interfaces. The executor must not pa
 - Avoid `unsafe`; any required use needs a documented safety argument and focused review.
 - Pin or constrain dependency versions and remove unused dependencies promptly.
 
+### Module design and size
+
+- Organize code around cohesive responsibilities and stable interfaces; a module should have one clear reason to change.
+- Do not split small, tightly related code merely to satisfy an arbitrary file-count or line-count target. Prefer local helpers when they keep one responsibility understandable.
+- Treat a module approaching **500 lines** as a design-review trigger. At that point, assess whether parsing, validation, lowering, execution, wire encoding, data models, or tests belong in focused submodules.
+- A production source file of roughly **700 lines or more** requires an explicit modularization decision in the change review. Keep it monolithic only when there is a documented, compelling cohesion reason.
+- Extract submodules by responsibility—not by mechanical line ranges. For example, the SQL engine should separate plan types, statement-specific lowering, field/path resolution, and tests when its single file becomes difficult to navigate.
+- Keep the public API in the parent module concise; keep internal details private to their submodules and avoid circular dependencies.
+
 ## 4. Python service standards
 
 - Format with `ruff format`, lint with `ruff check`, and type-check public boundaries with `mypy` or an equivalent checker.
@@ -117,4 +126,3 @@ A change is complete only when:
 - Security, logging, and configuration implications have been considered.
 - Documentation and acceptance criteria match the implementation.
 - The demo remains reproducible from the documented setup.
-
