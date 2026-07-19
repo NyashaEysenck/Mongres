@@ -85,6 +85,12 @@ impl FieldPath {
         self.0.join(".")
     }
 
+    /// Returns the segment-preserving representation used for safe nesting.
+    #[must_use]
+    pub fn segments(&self) -> &[String] {
+        &self.0
+    }
+
     /// Returns whether the path is a literal top-level key containing a dot.
     #[must_use]
     pub fn is_literal_dotted_key(&self) -> bool {

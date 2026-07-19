@@ -6,7 +6,7 @@
 use futures_util::TryStreamExt;
 use mongo_pg_common::{ErrorKind, ProxyError};
 use mongo_pg_sql_engine::{
-    ComparisonOperator, Predicate, Projection, SelectPlan, SqlValue, StatementPlan,
+    ComparisonOperator, InsertPlan, Predicate, Projection, SelectPlan, SqlValue, StatementPlan,
 };
 use mongodb::{
     Database,
@@ -66,6 +66,53 @@ pub async fn execute_select(
         .map_err(|error| database_error(&error))?;
 
     Ok(SelectOutcome { documents })
+}
+
+/// Executes a typed `INSERT` plan with deterministic BSON document creation.
+///
+/// # Errors
+///
+/// Returns an error when a row does not match its columns, a field path
+/// conflicts with another assigned path, a value is unsafe to represent, or
+/// the `MongoDB` driver rejects the insert.
+pub async fn execute_insert(
+    database: &Database,
+    plan: &InsertPlan,
+) -> Result<WriteOutcome, ProxyError> {
+    let documents = plan
+        .rows
+        .iter()
+        .map(|row| build_insert_document(&plan.columns, row))
+        .collect::<Result<Vec<_>, _>>()?;
+    if documents.is_empty() {
+        return Err(invalid_input("INSERT requires at least one row"));
+    }
+    let collection = database.collection::<Document>(&plan.collection);
+
+    let inserted = if documents.len() == 1 {
+        collection
+            .insert_one(
+                documents
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| invalid_input("INSERT requires at least one row"))?,
+            )
+            .await
+            .map_err(|error| database_error(&error))?;
+        1
+    } else {
+        collection
+            .insert_many(documents)
+            .await
+            .map_err(|error| database_error(&error))?
+            .inserted_ids
+            .len() as u64
+    };
+
+    Ok(WriteOutcome {
+        inserted,
+        ..WriteOutcome::default()
+    })
 }
 
 /// Refuses plans other than reads until their dedicated deterministic executor
@@ -191,6 +238,61 @@ fn bson_value(value: &SqlValue) -> Result<Bson, ProxyError> {
     }
 }
 
+fn build_insert_document(
+    columns: &[mongo_pg_schema_discovery::FieldPath],
+    row: &[SqlValue],
+) -> Result<Document, ProxyError> {
+    if columns.len() != row.len() {
+        return Err(invalid_input(
+            "INSERT row must contain one value for each declared column",
+        ));
+    }
+
+    let mut document = Document::new();
+    for (path, value) in columns.iter().zip(row) {
+        if path.is_literal_dotted_key() {
+            return Err(ProxyError::new(
+                ErrorKind::FeatureNotSupported,
+                "literal dotted MongoDB field names require an aggregation implementation",
+            ));
+        }
+        insert_nested_value(&mut document, path.segments(), bson_value(value)?)?;
+    }
+    Ok(document)
+}
+
+fn insert_nested_value(
+    document: &mut Document,
+    segments: &[String],
+    value: Bson,
+) -> Result<(), ProxyError> {
+    let Some((field, remaining)) = segments.split_first() else {
+        return Err(invalid_input("INSERT field path cannot be empty"));
+    };
+    if remaining.is_empty() {
+        if document.contains_key(field) {
+            return Err(invalid_input(format!(
+                "INSERT assigns field '{field}' more than once"
+            )));
+        }
+        document.insert(field, value);
+        return Ok(());
+    }
+
+    match document.get_mut(field) {
+        Some(Bson::Document(nested)) => insert_nested_value(nested, remaining, value),
+        Some(_) => Err(invalid_input(format!(
+            "INSERT field path conflicts with non-document field '{field}'"
+        ))),
+        None => {
+            let mut nested = Document::new();
+            insert_nested_value(&mut nested, remaining, value)?;
+            document.insert(field, Bson::Document(nested));
+            Ok(())
+        }
+    }
+}
+
 fn single_field(field: &str, value: Bson) -> Document {
     let mut document = Document::new();
     document.insert(field, value);
@@ -233,7 +335,7 @@ mod tests {
     use mongo_pg_sql_engine::{ComparisonOperator, Predicate, SqlValue};
     use mongodb::bson::{Bson, doc};
 
-    use super::predicate_document;
+    use super::{build_insert_document, predicate_document};
 
     #[test]
     fn builds_nested_comparison_filters() {
@@ -269,5 +371,43 @@ mod tests {
         })
         .expect_err("literal dotted keys require an aggregation path");
         assert_eq!(error.kind, ErrorKind::FeatureNotSupported);
+    }
+
+    #[test]
+    fn builds_nested_documents_for_insert_rows() {
+        let document = build_insert_document(
+            &[
+                FieldPath::top_level("name"),
+                FieldPath::top_level("profile").child("city"),
+            ],
+            &[
+                SqlValue::String("Amina".into()),
+                SqlValue::String("Harare".into()),
+            ],
+        )
+        .expect("nested INSERT row should be valid");
+        assert_eq!(document.get_str("name"), Ok("Amina"));
+        assert_eq!(
+            document
+                .get_document("profile")
+                .and_then(|profile| profile.get_str("city")),
+            Ok("Harare")
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_insert_paths() {
+        let error = build_insert_document(
+            &[
+                FieldPath::top_level("profile"),
+                FieldPath::top_level("profile").child("city"),
+            ],
+            &[
+                SqlValue::String("not-an-object".into()),
+                SqlValue::String("Harare".into()),
+            ],
+        )
+        .expect_err("a scalar and its nested path cannot be inserted together");
+        assert_eq!(error.kind, ErrorKind::InvalidInput);
     }
 }

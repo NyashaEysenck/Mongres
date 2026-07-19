@@ -2,10 +2,10 @@
 
 use std::env;
 
-use mongo_pg_mongo_executor::execute_select;
+use mongo_pg_mongo_executor::{execute_insert, execute_select};
 use mongo_pg_schema_discovery::FieldPath;
 use mongo_pg_sql_engine::{
-    ComparisonOperator, Predicate, ProjectedField, Projection, SelectPlan, SqlValue,
+    ComparisonOperator, InsertPlan, Predicate, ProjectedField, Projection, SelectPlan, SqlValue,
 };
 use mongodb::{
     Client,
@@ -64,4 +64,51 @@ async fn executes_a_nested_filter_and_projection_against_mongodb() {
         "Amina"
     );
     assert!(!outcome.documents[0].contains_key("profile"));
+}
+
+/// Requires a running local `MongoDB` instance.
+#[tokio::test]
+#[ignore = "requires a running MongoDB instance"]
+async fn persists_a_nested_insert_and_returns_the_actual_count() {
+    let uri = env::var("MONGO_INTEGRATION_URI")
+        .expect("MONGO_INTEGRATION_URI must be set for the MongoDB integration test");
+    let database_name = env::var("MONGO_INTEGRATION_DATABASE")
+        .expect("MONGO_INTEGRATION_DATABASE must be set for the MongoDB integration test");
+    let client = Client::with_uri_str(uri)
+        .await
+        .expect("integration MongoDB client should connect");
+    let database = client.database(&database_name);
+    let collection = database.collection::<Document>(TEST_COLLECTION);
+    collection
+        .delete_many(doc! {})
+        .await
+        .expect("test collection should be reset");
+
+    let plan = InsertPlan {
+        collection: TEST_COLLECTION.into(),
+        columns: vec![
+            FieldPath::top_level("name"),
+            FieldPath::top_level("profile").child("city"),
+        ],
+        rows: vec![vec![
+            SqlValue::String("Amina".into()),
+            SqlValue::String("Harare".into()),
+        ]],
+    };
+    let outcome = execute_insert(&database, &plan)
+        .await
+        .expect("INSERT plan should execute");
+    assert_eq!(outcome.inserted, 1);
+
+    let stored = collection
+        .find_one(doc! { "name": "Amina" })
+        .await
+        .expect("lookup should succeed")
+        .expect("inserted document should exist");
+    assert_eq!(
+        stored
+            .get_document("profile")
+            .and_then(|profile| profile.get_str("city")),
+        Ok("Harare")
+    );
 }
