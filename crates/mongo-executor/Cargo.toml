@@ -1,0 +1,13 @@
+[package]
+name = "mongo-pg-mongo-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mongo-pg-common = { path = "../common" }
+
+[lints]
+workspace = true
+

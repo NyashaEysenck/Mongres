@@ -1,0 +1,16 @@
+[package]
+name = "mongo-pg-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mongo-pg-catalog = { path = "../catalog" }
+mongo-pg-common = { path = "../common" }
+mongo-pg-mongo-executor = { path = "../mongo-executor" }
+mongo-pg-sql-engine = { path = "../sql-engine" }
+
+[lints]
+workspace = true
+
