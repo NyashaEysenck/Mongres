@@ -6,8 +6,14 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+futures-util = "0.3"
 mongo-pg-common = { path = "../common" }
+mongo-pg-schema-discovery = { path = "../schema-discovery" }
+mongo-pg-sql-engine = { path = "../sql-engine" }
+mongodb = "3.3"
 
 [lints]
 workspace = true
 
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

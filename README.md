@@ -12,7 +12,7 @@ The project foundation is in place. No database protocol or MongoDB behavior has
 cargo test --workspace
 ```
 
-Project goals, scope, implementation phases, acceptance criteria, and engineering standards are in [docs](docs/).
+Project goals, scope, implementation phases, acceptance criteria, engineering standards, and the live [implementation checklist](docs/IMPLEMENTATION_CHECKLIST.md) are in [docs](docs/).
 
 ## MongoDB fixture and live integration test
 

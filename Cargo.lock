@@ -834,7 +834,12 @@ version = "0.1.0"
 name = "mongo-pg-mongo-executor"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "mongo-pg-common",
+ "mongo-pg-schema-discovery",
+ "mongo-pg-sql-engine",
+ "mongodb",
+ "tokio",
 ]
 
 [[package]]

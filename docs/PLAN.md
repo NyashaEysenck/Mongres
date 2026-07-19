@@ -1,5 +1,7 @@
 # Implementation Plan
 
+Current implementation status is tracked in [IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md).
+
 ## Phase 1: Foundation and reproducible environment
 
 Create a Rust workspace and Python resolver service with shared configuration and error conventions.
