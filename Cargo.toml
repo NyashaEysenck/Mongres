@@ -5,6 +5,7 @@ members = [
     "crates/common",
     "crates/mongo-executor",
     "crates/proxy",
+    "crates/resolver-client",
     "crates/schema-discovery",
     "crates/sql-engine",
 ]

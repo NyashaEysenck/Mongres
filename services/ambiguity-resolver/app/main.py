@@ -1,47 +1,87 @@
-"""HTTP boundary for constrained write-ambiguity recommendations.
+"""HTTP boundary for constrained, side-effect-free ambiguity recommendations."""
 
-This service deliberately has no MongoDB driver dependency. The Rust proxy owns
-schema validation and every database operation.
-"""
+from __future__ import annotations
 
-from enum import StrEnum
+from fastapi import FastAPI, HTTPException
 
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
-
-
-class Resolution(StrEnum):
-    """Decisions the Rust proxy may independently validate."""
-
-    USE_NESTED_PATH = "use_nested_path"
-    USE_LITERAL_KEY = "use_literal_key"
-    COERCE_TO_STRING = "coerce_to_string"
-    REJECT = "reject"
-
-
-class AmbiguityRequest(BaseModel):
-    """Minimized schema evidence sent by the proxy for one proposed write."""
-
-    operation: str = Field(pattern="^(insert|update|delete)$")
-    field_path: str = Field(min_length=1)
-    observed_shapes: list[str] = Field(min_length=1)
-    allowed_decisions: list[Resolution] = Field(min_length=1)
+from .contract import (
+    CONTRACT_VERSION,
+    AmbiguityEvidence,
+    AmbiguityKind,
+    AmbiguityRequest,
+    AmbiguityResponse,
+    ObservedShape,
+    ObservedType,
+    Resolution,
+    ResolutionAdvisor,
+    WriteOperation,
+)
+from .providers import (
+    DeterministicAdvisor,
+    ProviderConfigurationError,
+    ProviderRequestError,
+    provider_advisor,
+)
 
 
-class AmbiguityResponse(BaseModel):
-    """Non-executable recommendation returned to the Rust proxy."""
+def validate_recommendation(
+    request: AmbiguityRequest, recommendation: AmbiguityResponse
+) -> AmbiguityResponse:
+    """Enforce correlation and the Rust-provided allowlist at the service boundary."""
 
-    decision: Resolution
-    confidence: float = Field(ge=0.0, le=1.0)
-    rationale: str = Field(min_length=1, max_length=500)
+    if recommendation.schema_profile_version != request.schema_profile_version:
+        raise ValueError("recommendation schema profile version does not match the request")
+    if recommendation.target_path != request.target_path:
+        raise ValueError("recommendation target path does not match the request")
+    if recommendation.decision not in request.allowed_decisions:
+        raise ValueError("recommendation decision is not in the request allowlist")
+    return recommendation
 
 
-app = FastAPI(title="Mongo PG Ambiguity Resolver", version="0.1.0")
+def create_app(advisor: ResolutionAdvisor | None = None) -> FastAPI:
+    """Build an app with a constrained provider selected by environment settings."""
+
+    active_advisor = advisor or provider_advisor()
+    resolver_app = FastAPI(title="Mongo PG Ambiguity Resolver", version="0.3.0")
+
+    @resolver_app.get("/healthz")
+    def health_check() -> dict[str, str]:
+        """Provide a dependency-free liveness endpoint."""
+
+        return {"status": "ok"}
+
+    @resolver_app.post("/v1/resolve", response_model=AmbiguityResponse)
+    def resolve_ambiguity(request: AmbiguityRequest) -> AmbiguityResponse:
+        """Return only an allowlisted recommendation; neither provider can execute MongoDB."""
+
+        try:
+            return validate_recommendation(request, active_advisor.recommend(request))
+        except ProviderConfigurationError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except ProviderRequestError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        except ValueError as error:
+            # A malformed provider result is unusable; the Rust caller fails closed.
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    return resolver_app
 
 
-@app.get("/healthz")
-def health_check() -> dict[str, str]:
-    """Provide a dependency-free liveness endpoint."""
+app = create_app()
 
-    return {"status": "ok"}
 
+__all__ = [
+    "CONTRACT_VERSION",
+    "AmbiguityEvidence",
+    "AmbiguityKind",
+    "AmbiguityRequest",
+    "AmbiguityResponse",
+    "DeterministicAdvisor",
+    "ObservedShape",
+    "ObservedType",
+    "Resolution",
+    "ResolutionAdvisor",
+    "WriteOperation",
+    "create_app",
+    "validate_recommendation",
+]

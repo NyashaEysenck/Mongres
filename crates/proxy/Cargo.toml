@@ -12,6 +12,7 @@ mongo-pg-ambiguity-policy = { path = "../ambiguity-policy" }
 mongo-pg-catalog = { path = "../catalog" }
 mongo-pg-common = { path = "../common" }
 mongo-pg-mongo-executor = { path = "../mongo-executor" }
+mongo-pg-resolver-client = { path = "../resolver-client" }
 mongo-pg-schema-discovery = { path = "../schema-discovery" }
 mongo-pg-sql-engine = { path = "../sql-engine" }
 mongodb = "3.3"

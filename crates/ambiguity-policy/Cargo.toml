@@ -9,6 +9,7 @@ rust-version.workspace = true
 mongo-pg-common = { path = "../common" }
 mongo-pg-schema-discovery = { path = "../schema-discovery" }
 mongo-pg-sql-engine = { path = "../sql-engine" }
+serde = { version = "1", features = ["derive"] }
 
 [lints]
 workspace = true

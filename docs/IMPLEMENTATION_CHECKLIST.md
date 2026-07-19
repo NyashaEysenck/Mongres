@@ -2,7 +2,9 @@
 
 This is the living progress record for the project. Completed items are checked only after their relevant quality checks pass.
 
-**Current focus:** Phase 6 — write-time ambiguity detection and constrained resolution.
+**Current focus:** Phase 6 has Google Gemini configured by default, with an
+OpenAI alternative behind the same constrained adapter boundary. The remaining
+work is a live MongoDB-plus-resolver demonstration.
 
 ## Phase 1 — Foundation and reproducible development environment
 
@@ -63,14 +65,23 @@ This is the living progress record for the project. Completed items are checked 
 
 ## Phase 6 — Write-time ambiguity resolution
 
-- [x] Implement a deterministic write ambiguity detector using schema profiles.
-- [x] Define the Rust allowlist for resolver decisions.
-- [ ] Implement resolver request handling, model adapter, timeout, and confidence policy.
-- [ ] Validate every resolver response in Rust before execution.
-- [ ] Ensure clear writes never invoke the resolver.
-- [ ] Fail closed for invalid, unavailable, or low-confidence decisions.
-- [ ] Record schema version, ambiguity, decision, and outcome in audit logs.
-- [ ] Add contract tests proving no raw LLM-generated MongoDB command is accepted.
+The MVP detects every ambiguity but resolves only the one case the deterministic
+executor already supports: choosing a nested path when a sampled field is
+missing. Mixed types, conflicting shapes, and literal dotted-key writes remain
+fail-closed until Rust has a dedicated safe execution primitive for them.
+
+- [x] Detect mixed types, conflicting shapes, dotted-key/path collisions, and sampled missing fields from schema profiles.
+- [x] Define the initial Rust allowlist: `UseNestedPath` or `Reject` only.
+- [x] Make the Python and Rust resolution contracts versioned and identical.
+- [x] Implement resolver request handling, an injectable non-executing advisor/model-adapter boundary, timeout, and confidence policy.
+- [x] Apply a validated `UseNestedPath` decision through the existing deterministic nested-write executor path.
+- [x] Validate response version, target field, allowlisted decision, and confidence in Rust before execution.
+- [x] Ensure clear writes never invoke the resolver.
+- [x] Fail closed for rejected, invalid, unavailable, timed-out, stale-profile, or low-confidence decisions.
+- [x] Record schema version, minimized ambiguity evidence, decision, confidence, and outcome in redacted audit records.
+- [x] Add contract tests proving no raw LLM-generated MongoDB command, pipeline, operator, path, or coercion is accepted.
+- [x] Configure Google Gemini by default and OpenAI as an alternative inside the constrained adapter boundary; provider credentials remain environment-only.
+- [ ] Add a live MongoDB-plus-resolver end-to-end test for clear bypass, accepted nested-path persistence, and failed-resolution no-write behavior.
 
 ## Phase 7 — End-to-end demo and hardening
 

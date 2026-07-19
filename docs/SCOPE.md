@@ -40,7 +40,12 @@ The write-time ambiguity gate covers:
 - Scalar, object, and array shape conflicts.
 - Coercions where multiple target types are plausible.
 
-The Python LLM service receives schema evidence and the proposed write and returns only an allowlisted decision, confidence, and audit rationale.
+The gate detects every listed condition. In the initial MVP, it resolves only a
+sampled-missing nested path, because the deterministic executor already owns
+that `$set` behavior. Mixed types, conflicting shapes, coercions, and literal
+dotted-key collisions remain reject-only. The Python LLM service receives
+minimized schema evidence and the proposed write and returns only an
+allowlisted decision, confidence, and audit rationale.
 
 ### Demo and operations
 

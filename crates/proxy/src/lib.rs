@@ -4,16 +4,22 @@
 //! plans before the executor sees it, and every execution error is emitted as
 //! a `PostgreSQL` SQLSTATE response.
 
-use std::{env, fmt::Debug, sync::Arc};
+use std::{
+    env,
+    fmt::Debug,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use futures_util::{Sink, StreamExt, stream};
-use mongo_pg_ambiguity_policy::{detect_write_ambiguities, unresolved_write_error};
+use mongo_pg_ambiguity_policy::audit::AmbiguityAuditRecord;
 use mongo_pg_catalog::{CollectionCatalog, SqlType, project_public_collection};
 use mongo_pg_common::{ErrorKind, ProxyError};
 use mongo_pg_mongo_executor::{
     WriteOutcome, deterministic_write_client, execute_select, execute_write,
 };
+use mongo_pg_resolver_client::{ResolverClient, ResolverClientConfig};
 use mongo_pg_schema_discovery::{SchemaProfile, load_persisted_profile};
 use mongo_pg_sql_engine::{Projection, SelectPlan, StatementPlan, parse_sql};
 use mongodb::{
@@ -39,13 +45,18 @@ use pgwire::{
 };
 use tokio::net::TcpListener;
 
+mod ambiguity;
+
 /// Runtime settings for a single collection-backed proxy instance.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProxyConfig {
     pub mongo_uri: String,
     pub database_name: String,
     pub collection_name: String,
     pub listen_address: String,
+    pub resolver_url: String,
+    pub resolver_timeout: Duration,
+    pub resolver_minimum_confidence: f64,
 }
 
 impl ProxyConfig {
@@ -61,6 +72,16 @@ impl ProxyConfig {
             collection_name: required_environment("MONGO_COLLECTION")?,
             listen_address: env::var("PROXY_LISTEN_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:5433".to_owned()),
+            resolver_url: env::var("AMBIGUITY_RESOLVER_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:8000/v1/resolve".to_owned()),
+            resolver_timeout: Duration::from_millis(optional_environment(
+                "AMBIGUITY_RESOLVER_TIMEOUT_MS",
+                5_000,
+            )?),
+            resolver_minimum_confidence: optional_confidence(
+                "AMBIGUITY_RESOLVER_MIN_CONFIDENCE",
+                0.8,
+            )?,
         })
     }
 }
@@ -92,11 +113,15 @@ pub async fn run_server(config: ProxyConfig) -> Result<(), ProxyError> {
     let listener = TcpListener::bind(&config.listen_address)
         .await
         .map_err(|error| dependency_error("bind PostgreSQL listener", &error))?;
+    let resolver_config = ResolverClientConfig::new(&config.resolver_url, config.resolver_timeout);
+    let resolver = ResolverClient::new(&resolver_config)?;
     let backend = Arc::new(ProxyBackend::new(
         database,
         config.database_name,
         config.collection_name,
         schema,
+        resolver,
+        config.resolver_minimum_confidence,
     ));
     let factory = Arc::new(ProxyHandlerFactory { backend });
 
@@ -123,6 +148,39 @@ fn required_environment(name: &str) -> Result<String, ProxyError> {
     })
 }
 
+fn optional_environment(name: &str, default: u64) -> Result<u64, ProxyError> {
+    match env::var(name) {
+        Ok(value) => value.parse().map_err(|_| {
+            ProxyError::new(
+                ErrorKind::InvalidInput,
+                format!("{name} must be a positive integer"),
+            )
+        }),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(ProxyError::new(ErrorKind::InvalidInput, error.to_string())),
+    }
+}
+
+fn optional_confidence(name: &str, default: f64) -> Result<f64, ProxyError> {
+    let confidence = match env::var(name) {
+        Ok(value) => value.parse().map_err(|_| {
+            ProxyError::new(
+                ErrorKind::InvalidInput,
+                format!("{name} must be a number between zero and one"),
+            )
+        })?,
+        Err(env::VarError::NotPresent) => default,
+        Err(error) => return Err(ProxyError::new(ErrorKind::InvalidInput, error.to_string())),
+    };
+    if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+        return Err(ProxyError::new(
+            ErrorKind::InvalidInput,
+            format!("{name} must be a number between zero and one"),
+        ));
+    }
+    Ok(confidence)
+}
+
 fn dependency_error(action: &str, error: &impl std::fmt::Display) -> ProxyError {
     ProxyError::new(
         ErrorKind::Dependency,
@@ -130,13 +188,15 @@ fn dependency_error(action: &str, error: &impl std::fmt::Display) -> ProxyError 
     )
 }
 
-#[derive(Debug)]
 struct ProxyBackend {
     database: Database,
     database_name: String,
     collection_name: String,
     schema: SchemaProfile,
     catalog: CollectionCatalog,
+    resolver: ResolverClient,
+    resolver_minimum_confidence: f64,
+    audit_records: Mutex<Vec<AmbiguityAuditRecord>>,
 }
 
 impl ProxyBackend {
@@ -145,6 +205,8 @@ impl ProxyBackend {
         database_name: String,
         collection_name: String,
         schema: SchemaProfile,
+        resolver: ResolverClient,
+        resolver_minimum_confidence: f64,
     ) -> Self {
         let catalog = project_public_collection(&collection_name, &schema);
         Self {
@@ -153,6 +215,9 @@ impl ProxyBackend {
             collection_name,
             schema,
             catalog,
+            resolver,
+            resolver_minimum_confidence,
+            audit_records: Mutex::new(Vec::new()),
         }
     }
 
@@ -167,12 +232,35 @@ impl ProxyBackend {
             plan @ (StatementPlan::Insert(_)
             | StatementPlan::Update(_)
             | StatementPlan::Delete(_)) => {
-                let ambiguities = detect_write_ambiguities(&plan, &self.schema)?;
-                if !ambiguities.is_empty() {
-                    return Err(unresolved_write_error(&ambiguities));
-                }
-                let outcome = execute_write(&self.database, &plan).await?;
-                Ok(ExecutionResult::Command(command_result(&plan, outcome)))
+                let resolved = ambiguity::resolve_write_plan(
+                    plan,
+                    &self.schema,
+                    &self.resolver,
+                    self.resolver_minimum_confidence,
+                    &self.audit_records,
+                )
+                .await?;
+                let outcome = match execute_write(&self.database, &resolved.plan).await {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        ambiguity::record_mongo_execution_failure(
+                            &self.schema,
+                            resolved.audit_context.as_ref(),
+                            &self.audit_records,
+                        );
+                        return Err(error);
+                    }
+                };
+                ambiguity::record_execution(
+                    &self.schema,
+                    resolved.audit_context.as_ref(),
+                    outcome,
+                    &self.audit_records,
+                );
+                Ok(ExecutionResult::Command(command_result(
+                    &resolved.plan,
+                    outcome,
+                )))
             }
         }
     }
@@ -693,9 +781,11 @@ impl ExtendedQueryHandler for ProxyBackend {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, time::Duration};
 
+    use mongo_pg_ambiguity_policy::audit::{AuditFailure, AuditOutcome};
     use mongo_pg_common::ErrorKind;
+    use mongo_pg_resolver_client::{ResolverClient, ResolverClientConfig};
     use mongo_pg_schema_discovery::{SampleDocument, SampleValue, SchemaProfile};
 
     use super::{ProxyBackend, WireValue, bson_to_wire_value};
@@ -705,6 +795,14 @@ mod tests {
             .into_iter()
             .map(|(name, value)| (name.to_owned(), value))
             .collect::<BTreeMap<_, _>>()
+    }
+
+    fn resolver_client() -> ResolverClient {
+        let config = ResolverClientConfig::new(
+            "http://127.0.0.1:8000/v1/resolve",
+            Duration::from_millis(10),
+        );
+        ResolverClient::new(&config).expect("test resolver endpoint is valid")
     }
 
     #[tokio::test]
@@ -721,6 +819,8 @@ mod tests {
             "demo".to_owned(),
             "customers".to_owned(),
             profile,
+            resolver_client(),
+            0.8,
         );
         let result = backend
             .catalog_or_session_query("SELECT * FROM information_schema.columns")
@@ -760,6 +860,8 @@ mod tests {
             "demo".to_owned(),
             "customers".to_owned(),
             profile,
+            resolver_client(),
+            0.8,
         );
 
         let error = backend
@@ -767,5 +869,14 @@ mod tests {
             .await
             .expect_err("ambiguous write must not reach MongoDB");
         assert_eq!(error.kind, ErrorKind::AmbiguousWrite);
+        let records = backend
+            .audit_records
+            .lock()
+            .expect("audit records are available");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].outcome,
+            AuditOutcome::Blocked(AuditFailure::NoSafeResolution)
+        );
     }
 }

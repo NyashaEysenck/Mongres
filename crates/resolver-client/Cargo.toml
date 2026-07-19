@@ -1,0 +1,17 @@
+[package]
+name = "mongo-pg-resolver-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mongo-pg-ambiguity-policy = { path = "../ambiguity-policy" }
+mongo-pg-common = { path = "../common" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

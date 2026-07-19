@@ -47,14 +47,14 @@
 
 ## E. Ambiguity-only LLM behavior
 
-- [ ] Clear writes complete without calling the LLM service.
-- [ ] The ambiguity detector catches mixed types, dotted-key/path collisions, missing-field shape ambiguity, and scalar/object/array conflicts.
-- [ ] The resolver receives schema evidence and the proposed write, not unrestricted database access.
-- [ ] The resolver can return only an allowlisted decision, confidence, and rationale.
-- [ ] The resolver cannot return executable MongoDB commands or pipelines accepted by the proxy.
-- [ ] Invalid, low-confidence, timed-out, or unavailable resolver responses fail closed with a PostgreSQL error.
-- [ ] A valid resolver decision is revalidated by Rust before execution.
-- [ ] The decision and resulting write are auditable.
+- [x] Clear writes complete without calling the LLM service.
+- [x] The ambiguity detector catches mixed types, dotted-key/path collisions, missing-field shape ambiguity, and scalar/object/array conflicts.
+- [x] The resolver receives schema evidence and the proposed write, not unrestricted database access.
+- [x] The resolver can return only an allowlisted decision, confidence, and rationale.
+- [x] The resolver cannot return executable MongoDB commands or pipelines accepted by the proxy.
+- [x] Invalid, low-confidence, timed-out, or unavailable resolver responses fail closed with a PostgreSQL error.
+- [x] A valid resolver decision is revalidated by Rust before execution.
+- [x] The decision and resulting write are auditable.
 
 ## F. Installation and demo
 

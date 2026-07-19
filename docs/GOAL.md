@@ -22,6 +22,10 @@ The primary demonstration is:
 2. Connect with `psql` over the PostgreSQL wire protocol.
 3. Run a normal `SELECT`.
 4. Execute an `INSERT` or `UPDATE` that persists correctly in a nested document.
-5. Execute a write involving a genuine type or shape ambiguity, show the constrained LLM decision, and verify the deterministic write result.
+5. Execute a write involving a genuine sampled-missing nested-path ambiguity, show the constrained decision, and verify the deterministic write result.
 
-The project must not claim full PostgreSQL or full SQL compatibility. Unsupported syntax, unsafe coercions, and unresolved document-shape ambiguity are expected to produce clear errors.
+The initial resolver does not coerce mixed types or conflicting shapes: those
+cases remain fail-closed until a dedicated deterministic execution primitive
+exists. The project must not claim full PostgreSQL or full SQL compatibility.
+Unsupported syntax, unsafe coercions, and unresolved document-shape ambiguity
+are expected to produce clear errors.
