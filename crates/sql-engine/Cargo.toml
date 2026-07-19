@@ -7,7 +7,8 @@ rust-version.workspace = true
 
 [dependencies]
 mongo-pg-common = { path = "../common" }
+mongo-pg-schema-discovery = { path = "../schema-discovery" }
+sqlparser = "0.53"
 
 [lints]
 workspace = true
-

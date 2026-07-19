@@ -1,4 +1,4 @@
-//! Integration coverage for real MongoDB sampling and profile persistence.
+//! Integration coverage for real `MongoDB` sampling and profile persistence.
 
 use std::env;
 
@@ -10,7 +10,7 @@ use mongodb::{
 
 const TEST_COLLECTION: &str = "schema_discovery_integration";
 
-/// Requires a MongoDB instance, normally started with `docker compose up -d`.
+/// Requires a `MongoDB` instance, normally started with `docker compose up -d`.
 ///
 /// Run with:
 /// `MONGO_INTEGRATION_URI=mongodb://localhost:27017 \
