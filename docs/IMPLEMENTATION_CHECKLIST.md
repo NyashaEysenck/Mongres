@@ -2,7 +2,7 @@
 
 This is the living progress record for the project. Completed items are checked only after their relevant quality checks pass.
 
-**Current focus:** Phase 4 — deterministic `INSERT` execution.
+**Current focus:** Phase 4 — deterministic nested `UPDATE` execution.
 
 ## Phase 1 — Foundation and reproducible development environment
 
@@ -40,7 +40,8 @@ This is the living progress record for the project. Completed items are checked 
 
 - [x] Translate typed `SELECT` plans into deterministic MongoDB `find` calls.
 - [x] Add a live integration test for nested `SELECT` filters and projections.
-- [ ] Translate typed `INSERT` plans into validated BSON documents and insert calls.
+- [x] Translate typed `INSERT` plans into validated BSON documents and insert calls.
+- [x] Add a live integration test for a persisted nested `INSERT` and inserted-row count.
 - [ ] Translate typed `UPDATE` plans into safe nested `$set` operations.
 - [ ] Translate typed `DELETE` plans into validated delete calls.
 - [ ] Map SQL values and prepared-statement parameters to BSON without silent lossy coercion.
