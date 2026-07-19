@@ -5,6 +5,20 @@
 //! deterministic and easy to test.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+
+use futures_util::TryStreamExt;
+use mongodb::{
+    Client, Database,
+    bson::{Bson, Document, doc, to_document},
+};
+use serde::{Deserialize, Serialize};
+
+/// Name of the `MongoDB` collection used to retain inferred schema profiles.
+pub const METADATA_COLLECTION: &str = "__pgproxy_schema";
+
+/// Result type returned by the `MongoDB` integration boundary.
+pub type DiscoveryResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 /// A sampled document represented without a database-driver dependency.
 pub type SampleDocument = BTreeMap<String, SampleValue>;
@@ -24,7 +38,7 @@ pub enum SampleValue {
 }
 
 /// A BSON-compatible scalar or container type observed for a field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ObservedType {
     Null,
     Boolean,
@@ -38,7 +52,7 @@ pub enum ObservedType {
 }
 
 /// The high-level field shapes that influence safe path and write decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ObservedShape {
     Scalar,
     Document,
@@ -47,7 +61,7 @@ pub enum ObservedShape {
 
 /// A path represented as segments so literal dotted keys are never conflated
 /// with nested document paths internally.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FieldPath(Vec<String>);
 
 impl FieldPath {
@@ -79,7 +93,7 @@ impl FieldPath {
 }
 
 /// Inferred information for one field path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldProfile {
     pub path: FieldPath,
     pub present_documents: usize,
@@ -100,8 +114,10 @@ impl FieldProfile {
 }
 
 /// The versionable schema profile produced from one collection sample.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaProfile {
+    /// Format version for backward-compatible persistence and migration.
+    pub profile_version: u32,
     pub sampled_documents: usize,
     pub fields: Vec<FieldProfile>,
 }
@@ -131,6 +147,7 @@ impl SchemaProfile {
             .collect();
 
         let mut profile = Self {
+            profile_version: 1,
             sampled_documents: documents.len(),
             fields,
         };
@@ -160,6 +177,98 @@ impl SchemaProfile {
                 .is_some_and(|count| *count > 1);
         }
     }
+}
+
+/// Samples a collection and infers its profile without persisting it.
+///
+/// # Errors
+///
+/// Returns an error when the sample size is zero or `MongoDB` cannot be queried.
+pub async fn discover_collection(
+    database: &Database,
+    collection_name: &str,
+    sample_size: usize,
+) -> DiscoveryResult<SchemaProfile> {
+    if sample_size == 0 {
+        return Err("schema discovery sample size must be greater than zero".into());
+    }
+
+    let collection = database.collection::<Document>(collection_name);
+    let mut cursor = collection.find(doc! {}).await?;
+    let mut documents = Vec::with_capacity(sample_size);
+
+    while let Some(document) = cursor.try_next().await? {
+        documents.push(sample_document_from_bson(&document));
+        if documents.len() == sample_size {
+            break;
+        }
+    }
+
+    Ok(SchemaProfile::infer(&documents))
+}
+
+/// Discovers and upserts a versioned schema profile for one source collection.
+///
+/// # Errors
+///
+/// Returns an error when sampling, serializing, or writing the profile fails.
+pub async fn discover_and_persist_collection(
+    client: &Client,
+    database_name: &str,
+    collection_name: &str,
+    sample_size: usize,
+) -> DiscoveryResult<SchemaProfile> {
+    let database = client.database(database_name);
+    let profile = discover_collection(&database, collection_name, sample_size).await?;
+    persist_profile(&database, collection_name, &profile).await?;
+    Ok(profile)
+}
+
+/// Upserts one profile per source collection in the metadata collection.
+///
+/// # Errors
+///
+/// Returns an error when the profile cannot be serialized or persisted.
+pub async fn persist_profile(
+    database: &Database,
+    source_collection: &str,
+    profile: &SchemaProfile,
+) -> DiscoveryResult<()> {
+    let metadata = database.collection::<Document>(METADATA_COLLECTION);
+    let record = to_document(&StoredSchemaProfile {
+        database: database.name().to_owned(),
+        collection: source_collection.to_owned(),
+        profile: profile.clone(),
+    })?;
+
+    metadata
+        .replace_one(
+            doc! {
+                "database": database.name(),
+                "collection": source_collection,
+            },
+            record,
+        )
+        .upsert(true)
+        .await?;
+
+    Ok(())
+}
+
+/// Converts a driver document into the pure input model used by inference.
+#[must_use]
+pub fn sample_document_from_bson(document: &Document) -> SampleDocument {
+    document
+        .iter()
+        .map(|(key, value)| (key.clone(), sample_value_from_bson(value)))
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredSchemaProfile {
+    database: String,
+    collection: String,
+    profile: SchemaProfile,
 }
 
 #[derive(Debug, Default)]
@@ -216,11 +325,31 @@ impl SampleValue {
     }
 }
 
+fn sample_value_from_bson(value: &Bson) -> SampleValue {
+    match value {
+        Bson::Null => SampleValue::Null,
+        Bson::Boolean(value) => SampleValue::Boolean(*value),
+        Bson::Int32(value) => SampleValue::Integer(i64::from(*value)),
+        Bson::Int64(value) => SampleValue::Integer(*value),
+        Bson::Double(value) => SampleValue::FloatingPoint(*value),
+        Bson::String(value) => SampleValue::String(value.clone()),
+        Bson::DateTime(value) => SampleValue::DateTime(value.to_string()),
+        Bson::ObjectId(value) => SampleValue::ObjectId(value.to_string()),
+        Bson::Document(value) => SampleValue::Document(sample_document_from_bson(value)),
+        Bson::Array(values) => {
+            SampleValue::Array(values.iter().map(sample_value_from_bson).collect())
+        }
+        _ => SampleValue::String(value.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         FieldPath, ObservedShape, ObservedType, SampleDocument, SampleValue, SchemaProfile,
+        sample_document_from_bson,
     };
+    use mongodb::bson::doc;
 
     fn document(fields: impl IntoIterator<Item = (&'static str, SampleValue)>) -> SampleDocument {
         fields
@@ -305,5 +434,22 @@ mod tests {
         assert!(nested.has_dotted_key_collision);
         assert!(literal.is_ambiguous());
         assert!(nested.is_ambiguous());
+    }
+
+    #[test]
+    fn converts_nested_driver_documents_before_inference() {
+        let document = doc! {
+            "active": true,
+            "profile": { "city": "Harare" },
+        };
+
+        let sample = sample_document_from_bson(&document);
+        let profile = SchemaProfile::infer(&[sample]);
+        assert!(profile.field(&FieldPath::top_level("active")).is_some());
+        assert!(
+            profile
+                .field(&FieldPath::top_level("profile").child("city"))
+                .is_some()
+        );
     }
 }

@@ -1,0 +1,17 @@
+services:
+  mongodb:
+    image: mongo:8.0
+    container_name: mongo-pg-proxy-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: demo
+    volumes:
+      - ./docker/mongodb/seed.js:/docker-entrypoint-initdb.d/seed.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+

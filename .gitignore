@@ -10,3 +10,6 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .venv/
+
+# Local MongoDB data volumes, if a developer adds one to Compose.
+/docker-data/
