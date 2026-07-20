@@ -86,9 +86,9 @@ fail-closed until Rust has a dedicated safe execution primitive for them.
 ## Phase 7 — End-to-end demo and hardening
 
 - [x] Add proxy and resolver containers to the Compose stack.
-- [ ] Provide a one-command startup and scripted demo.
-- [ ] Demonstrate schema discovery, `psql` read, persisted nested write, and ambiguity-resolved write.
-- [ ] Verify every demo write by reading MongoDB afterwards.
+- [x] Provide a one-command startup and scripted demo.
+- [x] Demonstrate schema discovery, `psql` read, persisted nested write, and ambiguity-resolved write.
+- [x] Verify every demo write by reading MongoDB afterwards.
 - [ ] Add structured logging, health/readiness endpoints, and configurable timeouts.
 - [ ] Redact credentials and sensitive values from logs/audit records.
 - [ ] Add regression fixtures for null/missing fields, arrays, mixed types, dotted keys, and partial failures.

@@ -45,7 +45,7 @@ class ProviderSettings:
     def from_environment(cls) -> ProviderSettings:
         """Loads provider configuration without ever returning a secret in an error."""
 
-        timeout_ms = _positive_timeout_ms(os.getenv("AMBIGUITY_LLM_TIMEOUT_MS", "4000"))
+        timeout_ms = _positive_timeout_ms(os.getenv("AMBIGUITY_LLM_TIMEOUT_MS", "30000"))
         return cls(
             provider=os.getenv("AMBIGUITY_LLM_PROVIDER", "google").lower(),
             timeout_seconds=timeout_ms / 1000,

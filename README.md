@@ -125,3 +125,24 @@ restart the proxy:
 docker compose run --rm schema-discovery
 docker compose restart proxy
 ```
+
+## One-command demo
+
+Run the complete protocol and write-correctness demonstration from a checkout
+with a provider key in `.env`:
+
+```bash
+./scripts/run-demo.sh
+```
+
+The script starts the stack, resets only the seeded ambiguity fixture, runs
+schema discovery, and then uses a disposable `psql` container to issue a read,
+a clear `INSERT` plus nested `UPDATE`, and the constrained LLM-resolved nested
+write. After each write, it reads the target document from MongoDB with
+`mongosh`; persistence is proved independently of the proxy response.
+
+It deliberately targets the seeded `demo.customers` collection, regardless of
+any local `MONGO_DATABASE` or `MONGO_COLLECTION` settings. The script needs a
+valid Google or OpenAI provider key because its final write is intentionally
+ambiguous and must fail closed if the resolver cannot return a validated
+decision.

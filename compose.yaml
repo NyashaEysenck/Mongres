@@ -22,7 +22,7 @@ services:
     container_name: mongo-pg-proxy-ambiguity-resolver
     environment:
       AMBIGUITY_LLM_PROVIDER: ${AMBIGUITY_LLM_PROVIDER:-google}
-      AMBIGUITY_LLM_TIMEOUT_MS: ${AMBIGUITY_LLM_TIMEOUT_MS:-4000}
+      AMBIGUITY_LLM_TIMEOUT_MS: ${AMBIGUITY_LLM_TIMEOUT_MS:-30000}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       GEMINI_API_BASE_URL: ${GEMINI_API_BASE_URL:-https://generativelanguage.googleapis.com}
@@ -49,7 +49,6 @@ services:
     build:
       context: .
       dockerfile: docker/proxy/Dockerfile
-    container_name: mongo-pg-proxy-schema-discovery
     environment:
       MONGO_URI: mongodb://mongodb:27017
       MONGO_DATABASE: ${MONGO_DATABASE:-demo}
@@ -72,7 +71,7 @@ services:
       MONGO_COLLECTION: ${MONGO_COLLECTION:-customers}
       PROXY_LISTEN_ADDR: 0.0.0.0:5433
       AMBIGUITY_RESOLVER_URL: http://ambiguity-resolver:8000/v1/resolve
-      AMBIGUITY_RESOLVER_TIMEOUT_MS: ${AMBIGUITY_RESOLVER_TIMEOUT_MS:-5000}
+      AMBIGUITY_RESOLVER_TIMEOUT_MS: ${AMBIGUITY_RESOLVER_TIMEOUT_MS:-30000}
       AMBIGUITY_RESOLVER_MIN_CONFIDENCE: ${AMBIGUITY_RESOLVER_MIN_CONFIDENCE:-0.8}
     ports:
       - "5433:5433"
@@ -85,3 +84,8 @@ services:
         condition: service_healthy
     command: ["mongo-pg-proxy"]
     restart: unless-stopped
+
+  psql:
+    image: postgres:16-alpine
+    profiles: ["demo"]
+    entrypoint: ["psql"]

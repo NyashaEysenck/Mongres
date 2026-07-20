@@ -18,7 +18,6 @@ database.customers.insertMany([
     active: false,
     profile: {
       address: {
-        city: "Bulawayo",
         country: "Zimbabwe",
       },
     },
@@ -41,4 +40,3 @@ database.ambiguous_profiles.insertMany([
     status: ["active"],
   },
 ]);
-
