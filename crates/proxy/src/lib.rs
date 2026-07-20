@@ -29,7 +29,6 @@ use mongodb::{
 use pgwire::{
     api::{
         ClientInfo, PgWireHandlerFactory, Type,
-        auth::noop::NoopStartupHandler,
         copy::NoopCopyHandler,
         portal::{Format, Portal},
         query::{ExtendedQueryHandler, SimpleQueryHandler},
@@ -46,6 +45,10 @@ use pgwire::{
 use tokio::net::TcpListener;
 
 mod ambiguity;
+mod auth;
+
+pub use auth::ProxyAuthConfig;
+use auth::ProxyStartupHandler;
 
 /// Runtime settings for a single collection-backed proxy instance.
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +60,7 @@ pub struct ProxyConfig {
     pub resolver_url: String,
     pub resolver_timeout: Duration,
     pub resolver_minimum_confidence: f64,
+    pub auth: ProxyAuthConfig,
 }
 
 impl ProxyConfig {
@@ -82,6 +86,7 @@ impl ProxyConfig {
                 "AMBIGUITY_RESOLVER_MIN_CONFIDENCE",
                 0.8,
             )?,
+            auth: ProxyAuthConfig::from_environment()?,
         })
     }
 }
@@ -123,7 +128,10 @@ pub async fn run_server(config: ProxyConfig) -> Result<(), ProxyError> {
         resolver,
         config.resolver_minimum_confidence,
     ));
-    let factory = Arc::new(ProxyHandlerFactory { backend });
+    let factory = Arc::new(ProxyHandlerFactory {
+        backend,
+        auth: config.auth,
+    });
 
     loop {
         let (socket, _) = listener
@@ -659,10 +667,11 @@ fn proxy_error_to_pgwire(error: ProxyError) -> PgWireError {
 
 struct ProxyHandlerFactory {
     backend: Arc<ProxyBackend>,
+    auth: ProxyAuthConfig,
 }
 
 impl PgWireHandlerFactory for ProxyHandlerFactory {
-    type StartupHandler = NoopStartupHandler;
+    type StartupHandler = ProxyStartupHandler;
     type SimpleQueryHandler = ProxyBackend;
     type ExtendedQueryHandler = ProxyBackend;
     type CopyHandler = NoopCopyHandler;
@@ -676,7 +685,7 @@ impl PgWireHandlerFactory for ProxyHandlerFactory {
     }
 
     fn startup_handler(&self) -> Arc<Self::StartupHandler> {
-        Arc::new(NoopStartupHandler)
+        Arc::new(ProxyStartupHandler::new(self.auth.clone()))
     }
 
     fn copy_handler(&self) -> Arc<Self::CopyHandler> {

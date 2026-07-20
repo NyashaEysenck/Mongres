@@ -2,9 +2,22 @@
 
 This is the living progress record for the project. Completed items are checked only after their relevant quality checks pass.
 
-**Current focus:** Phase 7 end-to-end demo and hardening. Phase 6 now has a
-live MongoDB-plus-resolver test that exercises clear write bypass, accepted
-nested-path persistence, and fail-closed no-write behavior.
+**Current focus:** full alignment with the original product requirement. The
+current implementation proves a constrained subset; the remaining work is
+defined in [REQUIREMENTS_ALIGNMENT_PLAN.md](REQUIREMENTS_ALIGNMENT_PLAN.md).
+
+## Requirements-alignment checklist — remaining work
+
+The detailed, authoritative task list is in
+[REQUIREMENTS_ALIGNMENT_PLAN.md](REQUIREMENTS_ALIGNMENT_PLAN.md). Track these
+milestones here as the plan is completed.
+
+- [ ] Complete Phase A: configurable authentication is implemented; typed parameter binding, standard driver test, `psql` evidence, and DBeaver validation remain.
+- [ ] Complete Phase B: configured multi-collection discovery, catalog projection, routing, and isolation tests.
+- [ ] Complete Phase C: Rust-generated mixed-type candidate decisions, lossless deterministic coercion, real LLM integration, and BSON-type demo verification.
+- [ ] Complete Phase D: deterministic structural ambiguity primitives before allowing any structural LLM decision.
+- [ ] Complete Phase E: real-MongoDB and wire-level regression matrix, profile lifecycle policy, and structured partial-failure diagnostics.
+- [ ] Complete Phase F: clean-environment Compose proof, health/readiness, redacted observability, inspectable audit sink, and final evidence note.
 
 ## Phase 1 — Foundation and reproducible development environment
 
@@ -57,7 +70,7 @@ nested-path persistence, and fail-closed no-write behavior.
 - [x] Build catalog projections from schema profiles for collections and columns.
 - [x] Implement minimal `pg_catalog` and `information_schema` responses.
 - [x] Add PostgreSQL type/OID mappings and text result-row encoding.
-- [x] Implement trust/no-op startup authentication and per-session handling with `pgwire`.
+- [x] Implement explicit trust and configured cleartext startup authentication with `pgwire`.
 - [x] Implement simple-query dispatch from the wire protocol to SQL plans/executor.
 - [x] Return PostgreSQL row descriptions, command completion, and SQLSTATE errors.
 - [x] Verify `psql` table listing, column inspection, reads, nested writes, and affected-row tags against local MongoDB.
@@ -65,7 +78,7 @@ nested-path persistence, and fail-closed no-write behavior.
 
 ## Phase 6 — Write-time ambiguity resolution
 
-The MVP detects every ambiguity but resolves only the one case the deterministic
+The current implementation detects every ambiguity but resolves only the one case the deterministic
 executor already supports: choosing a nested path when a sampled field is
 missing. Mixed types, conflicting shapes, and literal dotted-key writes remain
 fail-closed until Rust has a dedicated safe execution primitive for them.
@@ -87,7 +100,7 @@ fail-closed until Rust has a dedicated safe execution primitive for them.
 
 - [x] Add proxy and resolver containers to the Compose stack.
 - [x] Provide a one-command startup and scripted demo.
-- [x] Demonstrate schema discovery, `psql` read, persisted nested write, and ambiguity-resolved write.
+- [ ] Demonstrate schema discovery, `psql` read, persisted nested write, and the required mixed-type/structural ambiguity-resolved write.
 - [x] Verify every demo write by reading MongoDB afterwards.
 - [ ] Add structured logging, health/readiness endpoints, and configurable timeouts.
 - [ ] Redact credentials and sensitive values from logs/audit records.

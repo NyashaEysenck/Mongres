@@ -4,12 +4,37 @@ A Rust proxy that exposes MongoDB through the PostgreSQL wire protocol, with det
 
 ## Current status
 
-The MVP has schema discovery, typed SQL lowering, deterministic MongoDB CRUD,
+The current implementation has schema discovery, typed SQL lowering, deterministic MongoDB CRUD,
 schema-backed catalog projection, and a PostgreSQL wire-protocol server. The
-server currently uses trust/no-op authentication and supports PostgreSQL text
-results. The write-time ambiguity gate, constrained resolver contract, and
-fail-closed proxy integration are implemented. A production model-provider
-configuration and external GUI/driver validation remain next.
+server supports explicit local trust mode or configured cleartext credentials,
+and PostgreSQL text results. The write-time ambiguity gate, constrained Google/OpenAI resolver
+configuration, and fail-closed proxy integration are implemented. Real-client
+driver/DBeaver validation, typed parameters, and proxy readiness remain the
+next completion gates.
+
+The implemented boundary and the remaining work required to meet the original
+product requirement are tracked in
+[docs/REQUIREMENTS_ALIGNMENT_PLAN.md](docs/REQUIREMENTS_ALIGNMENT_PLAN.md).
+
+## Current implementation boundary
+
+The proxy exposes one configured MongoDB collection per instance and supports a
+deliberately narrow SQL subset: `SELECT`, `INSERT`, `UPDATE`, and `DELETE` with
+schema-known fields, supported literals, nested paths, comparisons, `IN`, `IS
+NULL`, `AND`, and `OR`. Joins, grouping, subqueries, windows, transactions, and
+general SQL breadth are not supported.
+
+Only clear writes execute directly. The resolver may authorize only the one
+currently supported ambiguity: a sampled-missing nested path. Mixed types, shape conflicts,
+coercions, and literal dotted-key writes fail closed. Prepared-statement
+parameters are not yet bound through the wire protocol, so clients must use the
+supported parameterless query flow. Trust authentication is for local
+demonstration only; do not expose the proxy publicly.
+
+Set `PROXY_AUTH_MODE=cleartext` together with `PROXY_AUTH_USER` and
+`PROXY_AUTH_PASSWORD` to require a PostgreSQL username and password. Cleartext
+authentication must run only on a trusted network or over TLS; the Compose demo
+defaults to `trust` mode.
 
 ## Local development
 
@@ -54,8 +79,10 @@ VALUES ('Amina', 'Harare');
 ## Run the constrained resolver
 
 The resolver has no MongoDB access and returns only a typed recommendation. It
-is optional for clear writes, but required when the schema marks a write as the
-one supported ambiguity: a sampled-missing nested path.
+is optional for clear writes, but currently required when the schema marks a
+write as a sampled-missing nested-path ambiguity. The
+[requirements-alignment plan](docs/REQUIREMENTS_ALIGNMENT_PLAN.md) adds the
+Rust-owned, LLM-selected mixed-type candidate required by the final demo.
 
 ```bash
 python3 -m venv /tmp/mongo-pg-resolver-venv

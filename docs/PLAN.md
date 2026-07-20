@@ -2,6 +2,8 @@
 
 Current implementation status is tracked in [IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md).
 Deterministic write behavior is specified in [WRITE_SEMANTICS.md](WRITE_SEMANTICS.md).
+The remaining work needed to meet the original product requirement is specified
+in [REQUIREMENTS_ALIGNMENT_PLAN.md](REQUIREMENTS_ALIGNMENT_PLAN.md).
 
 ## Phase 1: Foundation and reproducible environment
 
@@ -63,11 +65,11 @@ Expose the engine through `pgwire` and make standard clients believe they are co
 
 Deliverables:
 
-- Startup/authentication/session handling.
+- Startup/session handling with configurable authentication. Trust/no-op mode is limited to the local demo configuration.
 - Result sets, row descriptions, command completion, and error responses.
 - BSON-to-PostgreSQL type/OID mapping.
 - Minimal `pg_catalog` and `information_schema` views backed by discovery profiles.
-- Wire-level smoke tests using `psql`, a PostgreSQL driver, and DBeaver catalog discovery.
+- Wire-level smoke tests using `psql`, one PostgreSQL driver, and DBeaver catalog discovery. Decide whether typed prepared-statement binding is required for the supported-driver claim.
 
 Exit condition: `psql` can connect, list collections as tables, inspect columns, run a `SELECT`, and run a write.
 
@@ -83,13 +85,16 @@ Deliverables:
 - Fail-closed behavior when the resolver is unavailable, uncertain, or returns an invalid decision.
 - Audit records containing profile version, ambiguity, decision, and Mongo result.
 
-Exit condition: the ambiguous demo write invokes the resolver, applies only its constrained decision, and persists to the intended field.
+Exit condition: the resolver can select only Rust-generated candidates, and a
+real mixed-type demo write applies one validated, lossless candidate through the
+deterministic executor.
 
 ## Phase 7: Hardening and demo polish
 
 Deliverables:
 
-- Real-client integration tests for `psql` and DBeaver discovery.
+- Complete the requirements-alignment phases for standard tools, multi-collection routing, bounded mixed-type resolution, structural ambiguity primitives, and reproducible installation proof.
+- Add proxy health/readiness, structured redacted logs, and an operationally inspectable audit sink.
 - Security review of parameter handling, command construction, and log redaction.
 - Regression corpus for nested paths, arrays, null/missing fields, mixed types, and bulk failures.
 - README with one-command startup, demo script, architecture diagram, limitations, and troubleshooting.
@@ -107,7 +112,7 @@ Deliverables:
 
 ## Core-claim verification
 
-Before calling the MVP complete, record evidence for each product claim:
+Before calling the scoped product complete, record evidence for each product claim:
 
 | Claim | Required evidence |
 | --- | --- |
