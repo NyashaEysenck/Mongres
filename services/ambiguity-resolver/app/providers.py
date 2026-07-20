@@ -55,7 +55,7 @@ class ProviderSettings:
             provider=os.getenv("AMBIGUITY_LLM_PROVIDER", "google").lower(),
             timeout_seconds=timeout_ms / 1000,
             google_api_key=os.getenv("GEMINI_API_KEY"),
-            google_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+            google_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
             google_base_url=os.getenv(
                 "GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com"
             ).rstrip("/"),
@@ -129,8 +129,8 @@ class GoogleGeminiAdvisor:
             "generationConfig": {
                 "temperature": 0,
                 "responseMimeType": "application/json",
-                "maxOutputTokens": 1024,
-                "thinkingConfig": {"thinkingLevel": "low"},
+                "maxOutputTokens": 4096,
+                "responseSchema": _gemini_response_schema(),
             },
         }
         response = _post_json(
@@ -180,7 +180,9 @@ Return only the JSON object required by the response schema. You may select only
 one candidate in allowed_candidates and must echo contract_version,
 schema_profile_version, operation, and target_path exactly. Never propose MongoDB commands,
 aggregation pipelines, operators, paths, or type coercions. The candidate IDs
-are defined by Rust; never invent an ID. Reject when unsure."""
+are defined by Rust; never invent an ID. Non-reject candidates have already
+been validated by Rust as executable for this exact write. Choose reject only
+when the supplied evidence makes every executable candidate unsafe or unclear."""
 
 
 def _prompt(request: AmbiguityRequest) -> str:
@@ -191,8 +193,17 @@ def _prompt(request: AmbiguityRequest) -> str:
         "Evaluate this non-executable ambiguity request and return exactly one JSON object "
         "with exactly these keys: contract_version, schema_profile_version, operation, "
         "target_path, candidate, confidence, rationale. The candidate value must be one "
-        "of the strings in allowed_candidates. Do not use selected_candidate or any other "
-        "field name.\n"
+        "of the strings in allowed_candidates. The confidence value must be a JSON number "
+        "between 0 and 1, not a string label. Do not use selected_candidate or any other "
+        "field name. Keep rationale at or below 300 characters. Candidate semantics: "
+        "keep_string preserves only the incoming write "
+        "value as BSON string; parse_integer_losslessly converts only the incoming write "
+        "value to BSON integer after Rust has proven the conversion is lossless; neither "
+        "candidate rewrites existing documents. If you select a non-reject candidate, "
+        "confidence must be at least 0.8 because the proxy will fail closed below that "
+        "threshold; select reject instead when you cannot reach that confidence. Use "
+        "write_value.value_preview only to understand the incoming assignment value; do "
+        "not infer or emit any MongoDB operation from it.\n"
         + request_json
     )
 

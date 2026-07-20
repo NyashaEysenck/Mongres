@@ -86,6 +86,20 @@ class AmbiguityEvidence(StrictModel):
         return self
 
 
+class WriteValueEvidence(StrictModel):
+    """Minimized SQL value evidence for the proposed write target."""
+
+    sql_type: Literal[
+        "null",
+        "boolean",
+        "integer",
+        "floating_point",
+        "string",
+        "placeholder",
+    ]
+    value_preview: str | None = Field(default=None, max_length=128)
+
+
 class AmbiguityRequest(StrictModel):
     """A versioned request produced from Rust-calculated schema evidence."""
 
@@ -93,6 +107,7 @@ class AmbiguityRequest(StrictModel):
     schema_profile_version: int = Field(ge=1)
     operation: WriteOperation
     target_path: list[str] = Field(min_length=1, max_length=64)
+    write_value: WriteValueEvidence | None = None
     ambiguity: AmbiguityEvidence
     allowed_candidates: list[ResolutionCandidate] = Field(min_length=1, max_length=3)
 

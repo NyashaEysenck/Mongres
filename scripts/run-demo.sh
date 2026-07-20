@@ -35,7 +35,7 @@ verify_customer() {
 verify_mixed_status() {
   printf '\nMongoDB mixed-type verification for status-001:\n'
   compose exec -T mongodb mongosh --quiet demo --eval \
-    "printjson(db.mixed_statuses.aggregate([{$match: {_id: 'status-001'}}, {$project: {_id: 0, value: '$status', bsonType: {$type: '$status'}}}]).toArray())"
+    "printjson(db.mixed_statuses.aggregate([{\$match: {_id: 'status-001'}}, {\$project: {_id: 0, value: '\$status', bsonType: {\$type: '\$status'}}}]).toArray())"
 }
 
 wait_for_proxy() {
@@ -68,12 +68,12 @@ compose restart proxy >/dev/null
 wait_for_proxy
 
 printf '%s\n' 'Schema discovery completed; PostgreSQL wire protocol is ready.'
-run_sql 'SELECT name, active, "profile.address.city" FROM customers'
+run_sql 'SELECT name, active, profile.address.city FROM customers'
 
 # The insert is clear under the refreshed profile. The following nested update
 # demonstrates the deterministic executor constructing nested BSON on the new document.
 run_sql "INSERT INTO customers (_id, name, active) VALUES ('$demo_customer_id', 'Demo Customer', true)"
-run_sql "UPDATE customers SET \"profile.address.country\" = 'Zimbabwe' WHERE _id = '$demo_customer_id'"
+run_sql "UPDATE customers SET profile.address.country = 'Zimbabwe' WHERE _id = '$demo_customer_id'"
 verify_customer "$demo_customer_id"
 
 # `status` is observed as both string and integer, but has no structural

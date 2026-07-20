@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeSet, env, sync::Mutex, time::Duration};
 
+use mongo_pg_ambiguity_policy::ResolutionCandidate;
 use mongo_pg_mongo_executor::{deterministic_write_client, execute_write};
 use mongo_pg_resolver_client::{ResolverClient, ResolverClientConfig};
 use mongo_pg_schema_discovery::{
@@ -10,7 +11,7 @@ use mongo_pg_schema_discovery::{
 use mongo_pg_sql_engine::{
     AssignmentPlan, ComparisonOperator, Predicate, SqlValue, StatementPlan, UpdatePlan,
 };
-use mongodb::bson::{Document, doc};
+use mongodb::bson::{Bson, Document, doc};
 
 use super::{record_execution, resolve_write_plan};
 
@@ -89,12 +90,21 @@ async fn live_mongodb_and_resolver_write_flow() {
     .expect("resolver-approved mixed-type write should execute");
     assert_eq!(mixed_outcome.matched, 1);
     assert_eq!(mixed_outcome.modified, 1);
-    assert_eq!(
-        stored_document(&collection, "Amina")
-            .await
-            .get_i64("status"),
-        Ok(1)
-    );
+    let selected_candidate = audit_records
+        .lock()
+        .expect("audit records should be readable")
+        .iter()
+        .find_map(|record| record.selected_candidate)
+        .expect("mixed-type write should record the accepted resolver candidate");
+    let stored = stored_document(&collection, "Amina").await;
+    let status = stored
+        .get("status")
+        .expect("status should be persisted by the mixed-type write");
+    match selected_candidate {
+        ResolutionCandidate::ParseIntegerLosslessly => assert_eq!(status, &Bson::Int64(1)),
+        ResolutionCandidate::KeepString => assert_eq!(status, &Bson::String("1".to_owned())),
+        candidate => panic!("unexpected mixed-type candidate: {candidate:?}"),
+    }
 
     let nested_path = FieldPath::top_level("profile").child("city");
     let failed = resolve_and_execute(

@@ -85,8 +85,16 @@ pub struct ResolverRequest {
     pub schema_profile_version: u32,
     pub operation: WriteOperation,
     pub target_path: Vec<String>,
+    pub write_value: Option<ResolverWriteValueEvidence>,
     pub ambiguity: ResolverAmbiguityEvidence,
     pub allowed_candidates: BTreeSet<ResolutionCandidate>,
+}
+
+/// Minimized value evidence for the proposed write target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolverWriteValueEvidence {
+    pub sql_type: String,
+    pub value_preview: Option<String>,
 }
 
 /// Minimized schema evidence for one resolver target path.
@@ -216,6 +224,7 @@ pub fn resolver_request(
         schema_profile_version,
         operation,
         target_path: ambiguity.field_path.segments().to_vec(),
+        write_value: write_value_evidence(plan, ambiguity),
         ambiguity: ResolverAmbiguityEvidence {
             kinds: ambiguity.kinds.clone(),
             observed_types: ambiguity
@@ -231,6 +240,60 @@ pub fn resolver_request(
             missing_documents: ambiguity.missing_documents,
         },
         allowed_candidates: allowed_candidates(plan, ambiguity),
+    }
+}
+
+fn write_value_evidence(
+    plan: &StatementPlan,
+    ambiguity: &WriteAmbiguity,
+) -> Option<ResolverWriteValueEvidence> {
+    match plan {
+        StatementPlan::Insert(insert) => insert
+            .columns
+            .iter()
+            .position(|path| path == &ambiguity.field_path)
+            .and_then(|index| {
+                insert
+                    .rows
+                    .first()
+                    .and_then(|row| row.get(index))
+                    .map(value_evidence)
+            }),
+        StatementPlan::Update(update) => update
+            .assignments
+            .iter()
+            .find(|assignment| assignment.path == ambiguity.field_path)
+            .map(|assignment| value_evidence(&assignment.value)),
+        StatementPlan::Select(_) | StatementPlan::Delete(_) => None,
+    }
+}
+
+fn value_evidence(value: &SqlValue) -> ResolverWriteValueEvidence {
+    match value {
+        SqlValue::Null => ResolverWriteValueEvidence {
+            sql_type: "null".to_owned(),
+            value_preview: None,
+        },
+        SqlValue::Boolean(value) => ResolverWriteValueEvidence {
+            sql_type: "boolean".to_owned(),
+            value_preview: Some(value.to_string()),
+        },
+        SqlValue::Integer(value) => ResolverWriteValueEvidence {
+            sql_type: "integer".to_owned(),
+            value_preview: Some(value.to_string()),
+        },
+        SqlValue::FloatingPoint(value) => ResolverWriteValueEvidence {
+            sql_type: "floating_point".to_owned(),
+            value_preview: Some(value.to_string()),
+        },
+        SqlValue::String(value) => ResolverWriteValueEvidence {
+            sql_type: "string".to_owned(),
+            value_preview: Some(value.chars().take(128).collect()),
+        },
+        SqlValue::Placeholder(placeholder) => ResolverWriteValueEvidence {
+            sql_type: "placeholder".to_owned(),
+            value_preview: Some(placeholder.clone()),
+        },
     }
 }
 

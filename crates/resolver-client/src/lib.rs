@@ -94,7 +94,8 @@ impl ResolverClient {
     /// Returns a dependency error for transport, timeout, non-success, or
     /// malformed JSON failures.
     pub async fn resolve(&self, request: &ResolverRequest) -> Result<ResolverResponse, ProxyError> {
-        self.client
+        let response = self
+            .client
             .post(self.endpoint.clone())
             .json(request)
             .send()
@@ -104,22 +105,26 @@ impl ResolverClient {
                     ErrorKind::Dependency,
                     "ambiguity resolver is unavailable or timed out",
                 )
-            })?
-            .error_for_status()
-            .map_err(|_| {
-                ProxyError::new(
-                    ErrorKind::Dependency,
-                    "ambiguity resolver returned an HTTP error",
-                )
-            })?
-            .json::<ResolverResponse>()
-            .await
-            .map_err(|_| {
-                ProxyError::new(
-                    ErrorKind::Dependency,
-                    "ambiguity resolver returned an invalid response",
-                )
-            })
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "resolver response body was not readable".to_owned());
+            return Err(ProxyError::new(
+                ErrorKind::Dependency,
+                format!("ambiguity resolver returned HTTP {status}: {body}"),
+            ));
+        }
+
+        response.json::<ResolverResponse>().await.map_err(|_| {
+            ProxyError::new(
+                ErrorKind::Dependency,
+                "ambiguity resolver returned an invalid response",
+            )
+        })
     }
 }
 
@@ -140,6 +145,7 @@ mod tests {
             schema_profile_version: 7,
             operation: WriteOperation::Update,
             target_path: vec!["profile".into(), "address".into(), "city".into()],
+            write_value: None,
             ambiguity: ResolverAmbiguityEvidence {
                 kinds: BTreeSet::from([AmbiguityKind::MissingFromSampledDocuments]),
                 observed_types: vec!["string".into()],
