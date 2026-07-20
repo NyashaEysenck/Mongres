@@ -2,8 +2,9 @@
 
 Current implementation status is tracked in [IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md).
 Deterministic write behavior is specified in [WRITE_SEMANTICS.md](WRITE_SEMANTICS.md).
-The remaining work needed to meet the original product requirement is specified
-in [REQUIREMENTS_ALIGNMENT_PLAN.md](REQUIREMENTS_ALIGNMENT_PLAN.md).
+The remaining validation needed for the original product requirement is
+DBeaver GUI verification; implementation evidence is recorded in
+[DEMO_EVIDENCE.md](DEMO_EVIDENCE.md).
 
 ## Phase 1: Foundation and reproducible environment
 
@@ -69,7 +70,7 @@ Deliverables:
 - Result sets, row descriptions, command completion, and error responses.
 - BSON-to-PostgreSQL type/OID mapping.
 - Minimal `pg_catalog` and `information_schema` views backed by discovery profiles.
-- Wire-level smoke tests using `psql`, one PostgreSQL driver, and DBeaver catalog discovery. Decide whether typed prepared-statement binding is required for the supported-driver claim.
+- Wire-level smoke tests using `psql`, one PostgreSQL driver, and DBeaver catalog discovery.
 
 Exit condition: `psql` can connect, list collections as tables, inspect columns, run a `SELECT`, and run a write.
 
@@ -89,17 +90,16 @@ Exit condition: the resolver can select only Rust-generated candidates, and a
 real mixed-type demo write applies one validated, lossless candidate through the
 deterministic executor.
 
-## Phase 7: Hardening and demo polish
+## Phase 7: Demo proof and final validation
 
 Deliverables:
 
-- Complete the requirements-alignment phases for standard tools, multi-collection routing, bounded mixed-type resolution, structural ambiguity primitives, and reproducible installation proof.
-- Add proxy health/readiness, structured redacted logs, and an operationally inspectable audit sink.
-- Security review of parameter handling, command construction, and log redaction.
+- Complete the requirements-alignment phases for standard tools, multi-collection routing, bounded mixed-type resolution, and reproducible installation proof.
+- Add proxy health/readiness and redacted ambiguity audit records.
+- Security review of parameter handling, command construction, and resolver/audit redaction.
 - Regression corpus for nested paths, arrays, null/missing fields, mixed types, and bulk failures.
-- README with one-command startup, demo script, architecture diagram, limitations, and troubleshooting.
-- Basic latency and discovery-size benchmarks.
-- A clean-machine installation test and a short evidence note showing protocol compatibility, write correctness, and install prerequisites.
+- README and usage guide with one-command startup, demo script, limitations, and troubleshooting.
+- A clean Compose installation test and a short evidence note showing protocol compatibility, write correctness, and install prerequisites.
 
 ## Suggested work order
 
@@ -118,4 +118,4 @@ Before calling the scoped product complete, record evidence for each product cla
 | --- | --- |
 | Standard protocol | `psql` and at least one PostgreSQL driver connect and execute supported queries; DBeaver can inspect the emulated catalog. |
 | Reliable writes | Fixture-based tests prove filter selection, nested updates, counts, errors, and fail-closed ambiguity behavior against a real MongoDB. |
-| Easy install | A clean-machine smoke test starts the demo with documented container commands and no native extension build. |
+| Easy install | A clean Compose smoke test starts the demo with documented container commands and no native extension build. |

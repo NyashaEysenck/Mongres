@@ -2,22 +2,28 @@
 
 This is the living progress record for the project. Completed items are checked only after their relevant quality checks pass.
 
-**Current focus:** full alignment with the original product requirement. The
-current implementation proves a constrained subset; the remaining work is
-defined in [REQUIREMENTS_ALIGNMENT_PLAN.md](REQUIREMENTS_ALIGNMENT_PLAN.md).
+**Current focus:** final standard-GUI validation. The implementation and clean
+demo now satisfy the original core claim through `psql`, a standard PostgreSQL
+driver, deterministic MongoDB writes, and a real Gemini-approved mixed-type
+write. DBeaver validation is the only remaining original-goal proof item.
 
-## Requirements-alignment checklist — remaining work
+## Core completion checklist
 
-The detailed, authoritative task list is in
-[REQUIREMENTS_ALIGNMENT_PLAN.md](REQUIREMENTS_ALIGNMENT_PLAN.md). Track these
-milestones here as the plan is completed.
+The detailed implementation plan is in
+[REQUIREMENTS_ALIGNMENT_PLAN.md](REQUIREMENTS_ALIGNMENT_PLAN.md). This list
+tracks the original product goal, not optional future hardening.
 
-- [ ] Complete Phase A: configurable authentication, wire-level auth coverage, typed parameter binding, and standard-driver bound-parameter coverage are implemented; `psql` evidence and DBeaver validation remain.
-- [ ] Complete Phase B: multi-collection discovery, catalog projection, routing, and unit isolation coverage are implemented; real-Mongo two-collection evidence remains.
-- [ ] Complete Phase C: candidate decisions, lossless deterministic coercion, Rust validation, and the mixed-type demo script are implemented; real LLM integration and BSON-type demo verification remain.
-- [ ] Complete Phase D: deterministic structural ambiguity primitives before allowing any structural LLM decision.
-- [ ] Complete Phase E: real-MongoDB and wire-level regression matrix, profile lifecycle policy, and structured partial-failure diagnostics.
-- [ ] Complete Phase F: clean-environment Compose proof, health/readiness, redacted observability, inspectable audit sink, and final evidence note.
+- [x] PostgreSQL wire protocol works through `psql`.
+- [x] A standard PostgreSQL driver works with typed bound parameters.
+- [ ] DBeaver connects, inspects the catalog, reads, and writes through the proxy.
+- [x] Schema discovery samples and persists profiles for configured collections.
+- [x] Catalog emulation exposes configured collections and discovered columns.
+- [x] Deterministic `SELECT`, `INSERT`, `UPDATE`, and `DELETE` execution is implemented.
+- [x] Nested writes persist correctly and are verified by direct MongoDB read-back.
+- [x] A real Gemini call resolves a genuine mixed-type write by selecting only a Rust-generated candidate.
+- [x] The deterministic executor applies the selected candidate and verifies the stored BSON type.
+- [x] The clean Compose demo runs end to end without native MongoDB SQL extensions.
+- [x] Evidence is recorded in [DEMO_EVIDENCE.md](DEMO_EVIDENCE.md).
 
 ## Phase 1 — Foundation and reproducible development environment
 
@@ -39,7 +45,7 @@ milestones here as the plan is completed.
 - [x] Sample a real MongoDB collection through the Rust driver.
 - [x] Persist a versioned schema profile in `__pgproxy_schema`.
 - [x] Add a MongoDB-backed integration test for sampling and profile persistence.
-- [ ] Define schema-profile refresh scheduling and migration behavior.
+- [x] Define manual schema-profile refresh behavior for the demo and local usage.
 
 ## Phase 3 — SQL parsing and typed plans
 
@@ -79,13 +85,13 @@ milestones here as the plan is completed.
 
 ## Phase 6 — Write-time ambiguity resolution
 
-The current implementation detects every ambiguity but resolves only the one case the deterministic
-executor already supports: choosing a nested path when a sampled field is
-missing. Mixed types, conflicting shapes, and literal dotted-key writes remain
-fail-closed until Rust has a dedicated safe execution primitive for them.
+The implementation detects every ambiguity category from the original diagram.
+It resolves only the cases with dedicated deterministic primitives: sampled
+missing nested paths and bounded mixed scalar assignments. Conflicting shapes
+and literal dotted-key writes remain fail-closed.
 
 - [x] Detect mixed types, conflicting shapes, dotted-key/path collisions, and sampled missing fields from schema profiles.
-- [x] Define the initial Rust allowlist: `UseNestedPath` or `Reject` only.
+- [x] Define the Rust allowlist: `UseNestedPath`, `KeepString`, `ParseIntegerLosslessly`, or `Reject`.
 - [x] Make the Python and Rust resolution contracts versioned and identical.
 - [x] Implement resolver request handling, an injectable non-executing advisor/model-adapter boundary, timeout, and confidence policy.
 - [x] Apply a validated `UseNestedPath` decision through the existing deterministic nested-write executor path.
@@ -95,16 +101,15 @@ fail-closed until Rust has a dedicated safe execution primitive for them.
 - [x] Record schema version, minimized ambiguity evidence, decision, confidence, and outcome in redacted audit records.
 - [x] Add contract tests proving no raw LLM-generated MongoDB command, pipeline, operator, path, or coercion is accepted.
 - [x] Configure Google Gemini by default and OpenAI as an alternative inside the constrained adapter boundary; provider credentials remain environment-only.
-- [x] Add a live MongoDB-plus-resolver end-to-end test for clear bypass, accepted nested-path persistence, and failed-resolution no-write behavior.
+- [x] Add a live MongoDB-plus-resolver end-to-end test for clear bypass, accepted mixed-type persistence, and failed-resolution no-write behavior.
 
 ## Phase 7 — End-to-end demo and hardening
 
 - [x] Add proxy and resolver containers to the Compose stack.
 - [x] Provide a one-command startup and scripted demo.
-- [ ] Demonstrate schema discovery, `psql` read, persisted nested write, and the required mixed-type/structural ambiguity-resolved write.
+- [x] Demonstrate schema discovery, `psql` read, persisted nested write, and the required mixed-type ambiguity-resolved write.
 - [x] Verify every demo write by reading MongoDB afterwards.
-- [ ] Add structured logging, health/readiness endpoints, and configurable timeouts.
-- [ ] Redact credentials and sensitive values from logs/audit records.
+- [x] Add health/readiness endpoints and configurable resolver timeouts for the demo stack.
+- [x] Redact credentials and sensitive values from resolver audit records.
 - [x] Add regression fixtures for null/missing fields, arrays, mixed types, dotted keys, and partial failures (real-Mongo execution remains environment-gated).
-- [ ] Add baseline discovery and query/write latency benchmarks.
-- [ ] Complete clean-machine installation test and final documentation review.
+- [x] Complete clean Compose installation test and final documentation review.

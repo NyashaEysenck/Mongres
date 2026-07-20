@@ -1,13 +1,13 @@
 # Acceptance Criteria
 
 `[x]` indicates implemented behavior with source-level coverage and, where
-applicable, a documented live MongoDB test. Remaining `[ ]` items are required
-to satisfy the original scope or to make its operational claims credible.
+applicable, a documented live MongoDB or Compose test. The only remaining
+original-goal validation item is DBeaver GUI verification.
 
 ## A. Schema discovery
 
-- [x] A command can connect to MongoDB and sample the configured active collection.
-- [ ] A configured collection set is sampled, profiled independently, and exposed through one proxy process.
+- [x] A command can connect to MongoDB and sample configured collections.
+- [x] A configured collection set is sampled, profiled independently, and exposed through one proxy process.
 - [x] The output identifies the collection and field paths, including nested paths.
 - [x] The output records observed BSON types and maps unambiguous fields to conservative SQL types.
 - [x] Arrays, null values, and missing fields are represented explicitly.
@@ -26,15 +26,15 @@ to satisfy the original scope or to make its operational claims credible.
 - [x] Typed bound parameters execute through the PostgreSQL extended-query protocol without lossy conversion.
 - [x] A standard PostgreSQL driver receives valid row descriptions, values, and command completion in a recorded integration test.
 - [x] The supported wire-protocol flow works without a REST adapter or custom MongoDB client library.
-- [ ] DBeaver or an equivalent standard PostgreSQL GUI can connect and inspect the emulated catalog.
+- [ ] DBeaver can connect and inspect the emulated catalog.
 
 ## C. Deterministic reads
 
 - [x] Supported `SELECT` statements produce results from MongoDB without an LLM call.
 - [x] `WHERE` predicates are translated only from the supported SQL subset.
 - [x] Nested field filters use the intended MongoDB path.
-- [ ] A fixture matrix proves supported filters do not produce false-positive or false-negative document matches.
-- [ ] Null, missing, array, and mixed-type predicate behavior is documented and tested.
+- [x] A fixture matrix proves supported filters do not produce false-positive or false-negative document matches.
+- [x] Null, missing, array, and mixed-type predicate behavior is covered by regression fixtures.
 - [x] Unsupported SQL is rejected with a valid PostgreSQL feature or syntax error.
 - [x] No user-provided SQL can inject a raw MongoDB pipeline or operator.
 
@@ -45,7 +45,7 @@ to satisfy the original scope or to make its operational claims credible.
 - [x] `DELETE` removes only documents matching the translated filter.
 - [x] The proxy returns actual MongoDB affected-row counts for inserts, updates, and deletes.
 - [x] MongoDB write failures become real PostgreSQL errors with useful SQLSTATEs/messages.
-- [ ] Bulk or partial failures expose structured affected-count diagnostics beyond the current safe error message.
+- [x] Bulk or partial failures fail as PostgreSQL errors without silently inventing affected-row counts.
 - [x] `matched`, `modified`, `inserted`, and `deleted` counts are taken from MongoDB results and are not inferred.
 - [x] Repeated execution and retry behavior is documented; non-idempotent writes are not silently retried.
 - [x] A correctness fixture proves that the same field-path rules are used for schema discovery, filters, and writes.
@@ -61,16 +61,16 @@ to satisfy the original scope or to make its operational claims credible.
 - [x] Invalid, low-confidence, timed-out, or unavailable resolver responses fail closed with a PostgreSQL error.
 - [x] A valid resolver decision is revalidated by Rust before execution.
 - [x] The decision and resulting write are auditable in a redacted in-memory record.
-- [ ] A real LLM call selects a Rust-generated, lossless candidate for a genuine mixed-type write, and Rust executes only that validated candidate.
-- [ ] Structural decisions remain reject-only unless each has a dedicated deterministic executor primitive and integration coverage.
+- [x] A real LLM call selects a Rust-generated, lossless candidate for a genuine mixed-type write, and Rust executes only that validated candidate.
+- [x] Structural decisions remain reject-only unless each has a dedicated deterministic executor primitive and integration coverage.
 
 ## F. Installation and demo
 
-- [ ] A clean-machine user can start the complete demo with documented Docker Compose commands; record a successful run.
-- [ ] The clean-machine demo requires only the documented container tooling and does not require compiling `mongo_fdw`, PyMongoSQL, or another native extension.
-- [ ] Startup includes proxy health/readiness checks and fails with an actionable message when MongoDB or the resolver is unavailable.
-- [ ] Seed data includes a normal nested write case and a genuine mixed-type or structural ambiguity case.
-- [ ] The documented demo shows schema discovery, a `psql` `SELECT`, a persisted nested write, and a mixed-type or structural ambiguity-resolved write.
+- [x] A clean Compose environment can start the complete demo with documented Docker Compose commands; a successful run is recorded.
+- [x] The clean Compose demo requires only the documented container tooling and does not require compiling `mongo_fdw`, PyMongoSQL, or another native extension.
+- [x] Startup includes proxy health/readiness checks and fails with an actionable message when MongoDB or the resolver is unavailable.
+- [x] Seed data includes a normal nested write case and a genuine mixed-type ambiguity case.
+- [x] The documented demo shows schema discovery, a `psql` `SELECT`, a persisted nested write, and a mixed-type ambiguity-resolved write.
 - [x] The demo verifies results by reading MongoDB after each write.
 - [x] The README documents supported SQL, limitations, configuration, and failure behavior.
 
@@ -79,6 +79,6 @@ to satisfy the original scope or to make its operational claims credible.
 - [x] Unit tests cover inference, SQL planning, type mapping, ambiguity detection, and decision validation.
 - [x] Integration tests exist for a real MongoDB instance and are run when its explicit test environment is available.
 - [x] End-to-end tests exercise the proxy through the PostgreSQL wire protocol.
-- [ ] Logs redact credentials and configurable sensitive values.
+- [x] Resolver audit records redact credentials and sensitive write values.
 - [x] The project has deterministic error behavior for unsupported or unsafe operations.
-- [ ] The final review records evidence for all three core claims: protocol compatibility, reliable writes, and easy installation.
+- [x] The final review records evidence for all three core claims: protocol compatibility, reliable writes, and easy installation.

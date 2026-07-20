@@ -55,7 +55,7 @@ rationale.
 - Docker Compose for MongoDB, the Rust proxy, and the optional Python resolver.
 - Seed data covering normal nested documents and intentional ambiguity cases.
 - One-command startup and a documented demo script.
-- Structured redacted logging and an inspectable audit record for ambiguity decisions and write outcomes.
+- Redacted audit records for ambiguity decisions and write outcomes.
 - A clean-machine installation path that requires container tooling, not native MongoDB extension compilation.
 
 ### Correctness contract

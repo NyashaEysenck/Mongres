@@ -4,32 +4,32 @@ A Rust proxy that exposes MongoDB through the PostgreSQL wire protocol, with det
 
 ## Current status
 
-The current implementation has schema discovery, typed SQL lowering, deterministic MongoDB CRUD,
-schema-backed catalog projection, and a PostgreSQL wire-protocol server. The
-server supports explicit local trust mode or configured cleartext credentials,
-and PostgreSQL text results. The write-time ambiguity gate, constrained Google/OpenAI resolver
-configuration, and fail-closed proxy integration are implemented. Real-client
-driver/DBeaver validation, typed parameters, and proxy readiness remain the
-next completion gates.
+The current implementation has schema discovery, typed SQL lowering,
+deterministic MongoDB CRUD, multi-collection catalog projection, typed
+PostgreSQL protocol parameters, and a PostgreSQL wire-protocol server. The
+server supports explicit local trust mode or configured cleartext credentials.
+The write-time ambiguity gate, constrained Google/OpenAI resolver configuration,
+real Gemini mixed-type write flow, and fail-closed proxy integration are
+implemented.
 
-The implemented boundary and the remaining work required to meet the original
-product requirement are tracked in
-[docs/REQUIREMENTS_ALIGNMENT_PLAN.md](docs/REQUIREMENTS_ALIGNMENT_PLAN.md).
+The only remaining original-goal validation item is DBeaver GUI verification.
+`psql`, a standard PostgreSQL driver, the clean Compose demo, deterministic
+nested writes, and real LLM-approved mixed-type writes have been verified.
 
 ## Current implementation boundary
 
-The proxy exposes one configured MongoDB collection per instance and supports a
-deliberately narrow SQL subset: `SELECT`, `INSERT`, `UPDATE`, and `DELETE` with
-schema-known fields, supported literals, nested paths, comparisons, `IN`, `IS
-NULL`, `AND`, and `OR`. Joins, grouping, subqueries, windows, transactions, and
-general SQL breadth are not supported.
+The proxy exposes a configured MongoDB collection allowlist as SQL tables and
+supports a deliberately narrow SQL subset: `SELECT`, `INSERT`, `UPDATE`, and
+`DELETE` with schema-known fields, supported literals, typed placeholders,
+nested paths, comparisons, `IN`, `IS NULL`, `AND`, and `OR`. Joins, grouping,
+subqueries, windows, transactions, and general SQL breadth are not supported.
 
 Only clear writes execute directly. The resolver may authorize only the one
-currently supported ambiguity: a sampled-missing nested path. Mixed types, shape conflicts,
-coercions, and literal dotted-key writes fail closed. Prepared-statement
-parameters are not yet bound through the wire protocol, so clients must use the
-supported parameterless query flow. Trust authentication is for local
-demonstration only; do not expose the proxy publicly.
+currently supported ambiguous write class: a Rust-generated candidate for a
+sampled-missing nested path or a bounded mixed scalar field. Shape conflicts and
+literal dotted-key writes fail closed until Rust has a dedicated deterministic
+primitive for them. Trust authentication is for local demonstration only; do not
+expose the proxy publicly.
 
 Set `PROXY_AUTH_MODE=cleartext` together with `PROXY_AUTH_USER` and
 `PROXY_AUTH_PASSWORD` to require a PostgreSQL username and password. Cleartext
@@ -101,7 +101,10 @@ Set `AMBIGUITY_RESOLVER_URL`, `AMBIGUITY_RESOLVER_TIMEOUT_MS`, and
 Both providers are forced to a narrow JSON schema and still cannot execute or
 emit MongoDB commands.
 
-Project goals, scope, implementation phases, acceptance criteria, engineering standards, the live [implementation checklist](docs/IMPLEMENTATION_CHECKLIST.md), and [write semantics](docs/WRITE_SEMANTICS.md) are in [docs](docs/).
+Project goals, scope, implementation phases, acceptance criteria, engineering
+standards, the live [implementation checklist](docs/IMPLEMENTATION_CHECKLIST.md),
+[usage guide](docs/USAGE_GUIDE.md), [demo evidence](docs/DEMO_EVIDENCE.md), and
+[write semantics](docs/WRITE_SEMANTICS.md) are in [docs](docs/).
 
 ## MongoDB fixture and live integration test
 
@@ -166,9 +169,9 @@ with a provider key in `.env`:
 
 The script starts the stack, resets only the seeded ambiguity fixture, runs
 schema discovery, and then uses a disposable `psql` container to issue a read,
-a clear `INSERT` plus nested `UPDATE`, and the constrained LLM-resolved nested
-write. After each write, it reads the target document from MongoDB with
-`mongosh`; persistence is proved independently of the proxy response.
+a clear `INSERT` plus nested `UPDATE`, and the constrained LLM-resolved
+mixed-type write. After each write, it reads the target document from MongoDB
+with `mongosh`; persistence is proved independently of the proxy response.
 
 It deliberately targets the seeded `demo.customers` collection, regardless of
 any local `MONGO_DATABASE`, `MONGO_COLLECTIONS`, or legacy `MONGO_COLLECTION`

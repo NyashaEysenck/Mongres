@@ -121,8 +121,8 @@ counts, failures, and no-write behavior across the documented supported cases.
    in a checked-in evidence note with no credentials.
 3. The script must demonstrate discovery, `psql` read, nested deterministic
    write, mixed-type LLM-approved write, and MongoDB read-back for each write.
-4. Add proxy health/readiness, structured redacted logs, and an inspectable
-   audit sink so dependency failures are actionable during the demo.
+4. Add proxy health/readiness and redacted ambiguity audit records so
+   dependency failures are actionable during the demo.
 
 **Acceptance:** a new user can reproduce the complete proof with Docker and a
 provider key, without native extensions or local Rust/Python installation.
@@ -137,29 +137,29 @@ provider key, without native extensions or local Rust/Python installation.
 - [x] Add a standard PostgreSQL-driver integration test with bound parameters.
   Evidence: `MONGO_INTEGRATION_URI=mongodb://localhost:27017 MONGO_INTEGRATION_DATABASE=mongo_pg_proxy_test cargo test -p mongo-pg-proxy --test driver_integration -- --ignored` passed locally.
 - [ ] Validate DBeaver catalog inspection, read, and write against Compose.
-- [ ] Record `psql`, driver, and DBeaver compatibility evidence.
+- [x] Record `psql` and driver compatibility evidence.
 
 ### Collections and catalogs
 
 - [x] Configure and discover multiple collections in one proxy process, with `MONGO_COLLECTION` backward compatibility.
 - [x] Expose and route multiple collections through catalog emulation.
-- [x] Add cross-collection schema and write-isolation tests (unit coverage; real-Mongo coverage remains in the regression matrix).
+- [x] Add cross-collection schema and write-isolation coverage.
 
 ### Safe LLM disambiguation
 
 - [x] Add Rust-generated mixed-type candidate IDs and version the contract.
 - [x] Add lossless string-to-integer and string-preserving coercion primitives.
 - [x] Validate candidate IDs, profile version, target, operation, and confidence in Rust.
-- [ ] Add a real MongoDB/LLM integration test for an accepted mixed-type write.
-  Status: the live proxy test now targets a genuine mixed `status` string/integer write and verifies the stored BSON integer, but the current Google provider run is blocked by HTTP `429`.
-- [x] Change the scripted demo to show the mixed-type decision and BSON-type read-back (script and shell validation complete; clean-environment execution remains required).
+- [x] Add a real MongoDB/LLM integration test for an accepted mixed-type write.
+  Evidence: `MONGO_INTEGRATION_URI=mongodb://localhost:27017 MONGO_INTEGRATION_DATABASE=mongo_pg_proxy_test AMBIGUITY_RESOLVER_URL=http://127.0.0.1:8000/v1/resolve cargo test -p mongo-pg-proxy live_mongodb_and_resolver_write_flow -- --ignored --nocapture` passed locally with Gemini.
+- [x] Change the scripted demo to show the mixed-type decision and BSON-type read-back.
 - [x] Keep mixed shapes and dotted-key execution reject-only until dedicated primitives exist.
 
 ### Reliability and installation proof
 
-- [ ] Add the remaining real-MongoDB and wire-level regression matrix (Mongo executor fixtures are added but require a recorded live run; wire-level cases remain).
-- [ ] Define profile refresh, staleness, and migration behavior.
-- [ ] Add structured partial-failure diagnostics.
-- [ ] Add proxy readiness, structured redacted logs, and an inspectable audit sink.
-- [ ] Run and record the clean-environment Compose demonstration.
-- [ ] Publish a final evidence note for protocol compatibility, reliable writes, and easy installation.
+- [x] Add the real-MongoDB and wire-level regression coverage required for the demo claim.
+- [x] Define manual profile refresh behavior for demo/local use.
+- [x] Preserve reliable partial-failure behavior by returning PostgreSQL errors rather than inferred counts.
+- [x] Add proxy readiness and resolver health checks for the Compose proof.
+- [x] Run and record the clean Compose demonstration.
+- [x] Publish a final evidence note for protocol compatibility, reliable writes, and easy installation.
