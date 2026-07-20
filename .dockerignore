@@ -1,0 +1,11 @@
+# Keep local credentials, build output, and development tooling out of images.
+.git
+.env
+.venv
+target
+__pycache__
+.pytest_cache
+.ruff_cache
+.mypy_cache
+docker-data
+

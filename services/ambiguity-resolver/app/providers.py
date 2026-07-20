@@ -117,7 +117,7 @@ class GoogleGeminiAdvisor:
             "generationConfig": {
                 "temperature": 0,
                 "responseMimeType": "application/json",
-                "responseJsonSchema": _response_schema(),
+                "responseSchema": _gemini_response_schema(),
             },
         }
         response = _post_json(
@@ -200,6 +200,27 @@ def _response_schema() -> dict[str, Any]:
             # Pydantic applies the length bounds after provider output. Keeping
             # the provider schema to the Gemini-supported JSON Schema subset
             # lets both adapters share one response contract.
+            "rationale": {"type": "string"},
+        },
+    }
+
+
+def _gemini_response_schema() -> dict[str, Any]:
+    """Gemini accepts a smaller schema dialect; Pydantic keeps final validation strict."""
+
+    strict_schema = _response_schema()
+    return {
+        "type": "object",
+        "required": strict_schema["required"],
+        "properties": {
+            "contract_version": {"type": "string", "enum": ["v1"]},
+            "schema_profile_version": {"type": "integer"},
+            "target_path": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "decision": {"type": "string", "enum": ["use_nested_path", "reject"]},
+            "confidence": {"type": "number"},
             "rationale": {"type": "string"},
         },
     }

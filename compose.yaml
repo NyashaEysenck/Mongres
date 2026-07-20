@@ -15,3 +15,73 @@ services:
       retries: 20
       start_period: 5s
 
+  ambiguity-resolver:
+    build:
+      context: .
+      dockerfile: services/ambiguity-resolver/Dockerfile
+    container_name: mongo-pg-proxy-ambiguity-resolver
+    environment:
+      AMBIGUITY_LLM_PROVIDER: ${AMBIGUITY_LLM_PROVIDER:-google}
+      AMBIGUITY_LLM_TIMEOUT_MS: ${AMBIGUITY_LLM_TIMEOUT_MS:-4000}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_API_BASE_URL: ${GEMINI_API_BASE_URL:-https://generativelanguage.googleapis.com}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.2}
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  schema-discovery:
+    build:
+      context: .
+      dockerfile: docker/proxy/Dockerfile
+    container_name: mongo-pg-proxy-schema-discovery
+    environment:
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DATABASE: ${MONGO_DATABASE:-demo}
+      MONGO_COLLECTION: ${MONGO_COLLECTION:-customers}
+      MONGO_SAMPLE_SIZE: ${MONGO_SAMPLE_SIZE:-100}
+    command: ["mongo-pg-schema-discovery"]
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    restart: "no"
+
+  proxy:
+    build:
+      context: .
+      dockerfile: docker/proxy/Dockerfile
+    container_name: mongo-pg-proxy
+    environment:
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DATABASE: ${MONGO_DATABASE:-demo}
+      MONGO_COLLECTION: ${MONGO_COLLECTION:-customers}
+      PROXY_LISTEN_ADDR: 0.0.0.0:5433
+      AMBIGUITY_RESOLVER_URL: http://ambiguity-resolver:8000/v1/resolve
+      AMBIGUITY_RESOLVER_TIMEOUT_MS: ${AMBIGUITY_RESOLVER_TIMEOUT_MS:-5000}
+      AMBIGUITY_RESOLVER_MIN_CONFIDENCE: ${AMBIGUITY_RESOLVER_MIN_CONFIDENCE:-0.8}
+    ports:
+      - "5433:5433"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      schema-discovery:
+        condition: service_completed_successfully
+      ambiguity-resolver:
+        condition: service_healthy
+    command: ["mongo-pg-proxy"]
+    restart: unless-stopped

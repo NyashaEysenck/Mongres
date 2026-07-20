@@ -97,3 +97,31 @@ Stop the fixture when finished:
 ```bash
 docker compose down
 ```
+
+## Full-stack Compose startup
+
+Copy the environment template and set `GEMINI_API_KEY` when the demo needs an
+ambiguity-resolved write. The key is supplied to the resolver at runtime; it is
+ignored by Git and excluded from Docker build contexts.
+
+```bash
+cp .env.example .env
+# Set GEMINI_API_KEY in .env.
+docker compose up --build -d
+psql 'postgresql://localhost:5433/demo?sslmode=disable'
+```
+
+Compose starts MongoDB, the constrained resolver, a one-shot schema-discovery
+service, and then the proxy. Schema discovery must exit successfully before the
+proxy starts, so its catalog and SQL field validation always use a persisted
+profile. The stack uses the internal `mongodb` and `ambiguity-resolver` host
+names; host-side connection settings in `.env` cannot accidentally redirect a
+container to a different database.
+
+To refresh a schema profile after changing demo data, rerun only discovery and
+restart the proxy:
+
+```bash
+docker compose run --rm schema-discovery
+docker compose restart proxy
+```

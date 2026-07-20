@@ -2,9 +2,9 @@
 
 This is the living progress record for the project. Completed items are checked only after their relevant quality checks pass.
 
-**Current focus:** Phase 6 has Google Gemini configured by default, with an
-OpenAI alternative behind the same constrained adapter boundary. The remaining
-work is a live MongoDB-plus-resolver demonstration.
+**Current focus:** Phase 7 end-to-end demo and hardening. Phase 6 now has a
+live MongoDB-plus-resolver test that exercises clear write bypass, accepted
+nested-path persistence, and fail-closed no-write behavior.
 
 ## Phase 1 — Foundation and reproducible development environment
 
@@ -15,7 +15,7 @@ work is a live MongoDB-plus-resolver demonstration.
 - [x] Add project README and engineering standards.
 - [x] Add Rust formatting, tests, and strict Clippy quality gates.
 - [x] Add a MongoDB Compose fixture and seeded demo data.
-- [ ] Containerize the Rust proxy and Python resolver for a full-stack Compose startup.
+- [x] Containerize the Rust proxy and Python resolver for a full-stack Compose startup.
 
 ## Phase 2 — Schema discovery
 
@@ -81,11 +81,11 @@ fail-closed until Rust has a dedicated safe execution primitive for them.
 - [x] Record schema version, minimized ambiguity evidence, decision, confidence, and outcome in redacted audit records.
 - [x] Add contract tests proving no raw LLM-generated MongoDB command, pipeline, operator, path, or coercion is accepted.
 - [x] Configure Google Gemini by default and OpenAI as an alternative inside the constrained adapter boundary; provider credentials remain environment-only.
-- [ ] Add a live MongoDB-plus-resolver end-to-end test for clear bypass, accepted nested-path persistence, and failed-resolution no-write behavior.
+- [x] Add a live MongoDB-plus-resolver end-to-end test for clear bypass, accepted nested-path persistence, and failed-resolution no-write behavior.
 
 ## Phase 7 — End-to-end demo and hardening
 
-- [ ] Add proxy and resolver containers to the Compose stack.
+- [x] Add proxy and resolver containers to the Compose stack.
 - [ ] Provide a one-command startup and scripted demo.
 - [ ] Demonstrate schema discovery, `psql` read, persisted nested write, and ambiguity-resolved write.
 - [ ] Verify every demo write by reading MongoDB afterwards.
