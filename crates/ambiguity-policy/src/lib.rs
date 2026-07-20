@@ -887,8 +887,6 @@ mod tests {
             rationale: "This operation must not be accepted.".to_owned(),
         };
 
-        assert!(
-            validate_resolver_response(&request, &plan, &ambiguity, &response, 0.9).is_err()
-        );
+        assert!(validate_resolver_response(&request, &plan, &ambiguity, &response, 0.9).is_err());
     }
 }

@@ -12,9 +12,9 @@ The detailed, authoritative task list is in
 [REQUIREMENTS_ALIGNMENT_PLAN.md](REQUIREMENTS_ALIGNMENT_PLAN.md). Track these
 milestones here as the plan is completed.
 
-- [ ] Complete Phase A: configurable authentication is implemented; typed parameter binding, standard driver test, `psql` evidence, and DBeaver validation remain.
-- [ ] Complete Phase B: configured multi-collection discovery, catalog projection, routing, and isolation tests.
-- [ ] Complete Phase C: Rust-generated mixed-type candidate decisions, lossless deterministic coercion, real LLM integration, and BSON-type demo verification.
+- [ ] Complete Phase A: configurable authentication and typed parameter binding are implemented; wire auth, standard-driver, `psql` evidence, and DBeaver validation remain.
+- [ ] Complete Phase B: multi-collection discovery, catalog projection, routing, and unit isolation coverage are implemented; real-Mongo two-collection evidence remains.
+- [ ] Complete Phase C: candidate decisions, lossless deterministic coercion, and Rust validation are implemented; real LLM integration and BSON-type demo verification remain.
 - [ ] Complete Phase D: deterministic structural ambiguity primitives before allowing any structural LLM decision.
 - [ ] Complete Phase E: real-MongoDB and wire-level regression matrix, profile lifecycle policy, and structured partial-failure diagnostics.
 - [ ] Complete Phase F: clean-environment Compose proof, health/readiness, redacted observability, inspectable audit sink, and final evidence note.

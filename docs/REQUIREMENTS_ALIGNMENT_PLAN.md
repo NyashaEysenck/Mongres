@@ -133,25 +133,25 @@ provider key, without native extensions or local Rust/Python installation.
 
 - [x] Add configurable cleartext credential authentication and document local trust mode.
 - [ ] Add a wire-level authentication test proving valid credentials connect and invalid credentials return SQLSTATE `28P01`.
-- [ ] Implement typed extended-query parameter binding.
+- [x] Implement typed extended-query parameter binding with strict supported OID decoding and schema revalidation.
 - [ ] Add a standard PostgreSQL-driver integration test with bound parameters.
 - [ ] Validate DBeaver catalog inspection, read, and write against Compose.
 - [ ] Record `psql`, driver, and DBeaver compatibility evidence.
 
 ### Collections and catalogs
 
-- [ ] Configure and discover multiple collections in one proxy process.
-- [ ] Expose and route multiple collections through catalog emulation.
-- [ ] Add cross-collection schema and write-isolation tests.
+- [x] Configure and discover multiple collections in one proxy process, with `MONGO_COLLECTION` backward compatibility.
+- [x] Expose and route multiple collections through catalog emulation.
+- [x] Add cross-collection schema and write-isolation tests (unit coverage; real-Mongo coverage remains in the regression matrix).
 
 ### Safe LLM disambiguation
 
-- [ ] Add Rust-generated mixed-type candidate IDs and version the contract.
-- [ ] Add lossless string-to-integer and string-preserving coercion primitives.
-- [ ] Validate candidate IDs, profile version, target, operation, and confidence in Rust.
+- [x] Add Rust-generated mixed-type candidate IDs and version the contract.
+- [x] Add lossless string-to-integer and string-preserving coercion primitives.
+- [x] Validate candidate IDs, profile version, target, operation, and confidence in Rust.
 - [ ] Add a real MongoDB/LLM integration test for an accepted mixed-type write.
 - [ ] Change the scripted demo to show the mixed-type decision and BSON-type read-back.
-- [ ] Keep mixed shapes and dotted-key execution reject-only until dedicated primitives exist.
+- [x] Keep mixed shapes and dotted-key execution reject-only until dedicated primitives exist.
 
 ### Reliability and installation proof
 

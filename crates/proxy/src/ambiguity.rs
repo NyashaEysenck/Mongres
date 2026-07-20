@@ -70,6 +70,27 @@ pub(crate) async fn resolve_write_plan(
         return Err(unresolved_write_error(&ambiguities));
     }
 
+    resolve_single_ambiguity(
+        plan,
+        schema,
+        resolver,
+        minimum_confidence,
+        audit_records,
+        operation,
+        ambiguities,
+    )
+    .await
+}
+
+async fn resolve_single_ambiguity(
+    plan: StatementPlan,
+    schema: &SchemaProfile,
+    resolver: &ResolverClient,
+    minimum_confidence: f64,
+    audit_records: &Mutex<Vec<AmbiguityAuditRecord>>,
+    operation: mongo_pg_ambiguity_policy::WriteOperation,
+    ambiguities: Vec<WriteAmbiguity>,
+) -> Result<ResolvedWrite, ProxyError> {
     let ambiguity = &ambiguities[0];
     let request = resolver_request(&plan, operation, schema.profile_version, ambiguity);
     if !has_executable_candidate(&request.allowed_candidates) {
