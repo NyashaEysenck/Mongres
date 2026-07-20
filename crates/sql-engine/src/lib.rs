@@ -3,12 +3,14 @@
 //! This crate accepts a deliberately small SQL subset. It does not create
 //! `MongoDB` operations; that responsibility belongs to the executor crate.
 
+mod binding;
 mod lowering;
 mod plan;
 mod resolve;
 mod type_policy;
 
-pub use lowering::parse_sql;
+pub use binding::bind_parameters;
+pub use lowering::{parse_sql, parse_sql_for_profiles};
 pub use plan::{
     AssignmentPlan, ComparisonOperator, DeletePlan, InsertPlan, Predicate, ProjectedField,
     Projection, SelectPlan, SqlValue, StatementPlan, UpdatePlan,

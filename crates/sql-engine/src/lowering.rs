@@ -1,5 +1,7 @@
 //! Statement-specific SQL validation and lowering.
 
+use std::collections::BTreeMap;
+
 use mongo_pg_common::{ErrorKind, ProxyError};
 use mongo_pg_schema_discovery::SchemaProfile;
 use sqlparser::{
@@ -15,7 +17,8 @@ use crate::{
     AssignmentPlan, DeletePlan, InsertPlan, ProjectedField, Projection, SelectPlan, StatementPlan,
     UpdatePlan,
     resolve::{
-        collection_from_object_name, collection_from_table_with_joins, parse_limit,
+        collection_from_object_name, collection_from_table_with_joins,
+        collection_name_from_object_name, collection_name_from_table_with_joins, parse_limit,
         parse_predicate, parse_value, resolve_expression_field, resolve_field,
         resolve_insert_column,
     },
@@ -34,12 +37,49 @@ pub fn parse_sql(
     collection_name: &str,
     schema: &SchemaProfile,
 ) -> Result<StatementPlan, ProxyError> {
-    let statements = Parser::parse_sql(&PostgreSqlDialect {}, sql)
-        .map_err(|error| ProxyError::new(ErrorKind::Syntax, error.to_string()))?;
-    let [statement] = statements.as_slice() else {
-        return Err(invalid_input("exactly one SQL statement is required"));
-    };
+    let statement = parse_one_statement(sql)?;
+    lower_statement(&statement, collection_name, schema)
+}
 
+/// Parses a statement and routes it through one configured collection profile.
+///
+/// The router derives the unqualified SQL table name from the parsed AST,
+/// verifies that name exists in the configured profile map, then lowers the
+/// same AST using only that collection's profile. No fallback or cross-table
+/// field lookup is permitted.
+///
+/// # Errors
+///
+/// Returns a `PostgreSQL`-mapped error for invalid syntax, unsupported SQL,
+/// an unallowlisted collection, or fields absent from the selected profile.
+pub fn parse_sql_for_profiles(
+    sql: &str,
+    profiles: &BTreeMap<String, SchemaProfile>,
+) -> Result<StatementPlan, ProxyError> {
+    let statement = parse_one_statement(sql)?;
+    let collection_name = collection_name_from_statement(&statement)?;
+    let schema = profiles.get(&collection_name).ok_or_else(|| {
+        invalid_input(format!(
+            "collection '{collection_name}' is not in the configured collection allowlist"
+        ))
+    })?;
+    lower_statement(&statement, &collection_name, schema)
+}
+
+fn parse_one_statement(sql: &str) -> Result<Statement, ProxyError> {
+    let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, sql)
+        .map_err(|error| ProxyError::new(ErrorKind::Syntax, error.to_string()))?;
+    if statements.len() != 1 {
+        return Err(invalid_input("exactly one SQL statement is required"));
+    }
+    Ok(statements.pop().expect("statement count was checked"))
+}
+
+fn lower_statement(
+    statement: &Statement,
+    collection_name: &str,
+    schema: &SchemaProfile,
+) -> Result<StatementPlan, ProxyError> {
     match statement {
         Statement::Query(query) => parse_select(query, collection_name, schema),
         Statement::Insert(insert) => parse_insert(insert, collection_name, schema),
@@ -63,6 +103,36 @@ pub fn parse_sql(
         Statement::Delete(delete) => parse_delete(delete, collection_name, schema),
         _ => Err(unsupported_feature("statement type")),
     }
+}
+
+fn collection_name_from_statement(statement: &Statement) -> Result<String, ProxyError> {
+    match statement {
+        Statement::Query(query) => collection_name_from_query(query),
+        Statement::Insert(insert) => collection_name_from_object_name(&insert.table_name),
+        Statement::Update { table, .. } => collection_name_from_table_with_joins(table),
+        Statement::Delete(delete) => {
+            let tables = match &delete.from {
+                FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => tables,
+            };
+            let [table] = tables.as_slice() else {
+                return Err(unsupported_feature("multi-table DELETE"));
+            };
+            collection_name_from_table_with_joins(table)
+        }
+        _ => Err(unsupported_feature("statement type")),
+    }
+}
+
+fn collection_name_from_query(query: &sqlparser::ast::Query) -> Result<String, ProxyError> {
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Err(unsupported_feature("subqueries, VALUES, or set operations"));
+    };
+    let [table] = select.from.as_slice() else {
+        return Err(unsupported_feature(
+            "queries without exactly one FROM table",
+        ));
+    };
+    collection_name_from_table_with_joins(table)
 }
 
 fn parse_select(

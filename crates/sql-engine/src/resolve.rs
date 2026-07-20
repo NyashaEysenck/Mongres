@@ -10,6 +10,23 @@ pub(crate) fn collection_from_table_with_joins(
     table: &TableWithJoins,
     collection_name: &str,
 ) -> Result<String, ProxyError> {
+    let collection = collection_name_from_table_with_joins(table)?;
+    if collection != collection_name {
+        return Err(invalid_input(format!(
+            "collection '{collection}' does not match the active collection '{collection_name}'"
+        )));
+    }
+    Ok(collection)
+}
+
+/// Extracts the exact unqualified collection name from one supported table
+/// reference without binding it to a schema profile.
+///
+/// This is used by the multi-collection router before statement lowering
+/// chooses the collection's isolated profile.
+pub(crate) fn collection_name_from_table_with_joins(
+    table: &TableWithJoins,
+) -> Result<String, ProxyError> {
     if !table.joins.is_empty() {
         return Err(unsupported_feature("JOIN"));
     }
@@ -19,22 +36,27 @@ pub(crate) fn collection_from_table_with_joins(
     if args.is_some() {
         return Err(unsupported_feature("table-valued function"));
     }
-    collection_from_object_name(name, collection_name)
+    collection_name_from_object_name(name)
 }
 
 pub(crate) fn collection_from_object_name(
     name: &ObjectName,
     expected_collection: &str,
 ) -> Result<String, ProxyError> {
+    let collection = collection_name_from_object_name(name)?;
+    if collection != expected_collection {
+        return Err(invalid_input(format!(
+            "collection '{collection}' does not match the active collection '{expected_collection}'"
+        )));
+    }
+    Ok(collection)
+}
+
+/// Extracts an exact unqualified collection name from an object name.
+pub(crate) fn collection_name_from_object_name(name: &ObjectName) -> Result<String, ProxyError> {
     let [identifier] = name.0.as_slice() else {
         return Err(unsupported_feature("qualified collection name"));
     };
-    if identifier.value != expected_collection {
-        return Err(invalid_input(format!(
-            "collection '{}' does not match the active collection '{}'",
-            identifier.value, expected_collection
-        )));
-    }
     Ok(identifier.value.clone())
 }
 

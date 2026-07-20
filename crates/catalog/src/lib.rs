@@ -100,6 +100,36 @@ pub struct CollectionCatalog {
     pub columns: Vec<ColumnMetadata>,
 }
 
+/// Catalog metadata for every allowlisted collection exposed by one proxy.
+///
+/// Tables are keyed by their SQL-facing collection name. The ordered map makes
+/// `information_schema` and `pg_catalog` iteration stable and prevents one
+/// collection's field metadata from being used for another collection.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DatabaseCatalog {
+    tables: BTreeMap<String, CollectionCatalog>,
+}
+
+impl DatabaseCatalog {
+    /// Returns the catalog projection for one exact allowlisted table name.
+    #[must_use]
+    pub fn table(&self, table_name: &str) -> Option<&CollectionCatalog> {
+        self.tables.get(table_name)
+    }
+
+    /// Iterates over all projected tables in deterministic name order.
+    #[must_use]
+    pub fn tables(&self) -> impl ExactSizeIterator<Item = &CollectionCatalog> {
+        self.tables.values()
+    }
+
+    /// Iterates over every projected column, grouped by deterministic table
+    /// order and then deterministic column order.
+    pub fn columns(&self) -> impl Iterator<Item = &ColumnMetadata> {
+        self.tables.values().flat_map(|table| table.columns.iter())
+    }
+}
+
 /// Projects a collection profile into table and column metadata.
 ///
 /// Literal dotted keys and true nested paths can have the same SQL-facing
@@ -142,6 +172,27 @@ pub fn project_public_collection(
     profile: &SchemaProfile,
 ) -> CollectionCatalog {
     project_collection(DEFAULT_SCHEMA, table_name, profile)
+}
+
+/// Projects every persisted allowlisted collection into the default `public`
+/// schema.
+///
+/// The input map is keyed by the `MongoDB` collection name; it is deliberately
+/// not inferred from document contents so callers can enforce the configured
+/// allowlist before catalog exposure and SQL routing.
+#[must_use]
+pub fn project_public_collections(profiles: &BTreeMap<String, SchemaProfile>) -> DatabaseCatalog {
+    DatabaseCatalog {
+        tables: profiles
+            .iter()
+            .map(|(collection_name, profile)| {
+                (
+                    collection_name.clone(),
+                    project_public_collection(collection_name, profile),
+                )
+            })
+            .collect(),
+    }
 }
 
 fn column_from_fields(
@@ -195,7 +246,10 @@ mod tests {
 
     use mongo_pg_schema_discovery::{SampleDocument, SampleValue, SchemaProfile};
 
-    use super::{DEFAULT_SCHEMA, SqlType, project_collection, project_public_collection};
+    use super::{
+        DEFAULT_SCHEMA, SqlType, project_collection, project_public_collection,
+        project_public_collections,
+    };
 
     fn document(fields: impl IntoIterator<Item = (&'static str, SampleValue)>) -> SampleDocument {
         fields
@@ -295,5 +349,48 @@ mod tests {
         );
         assert_eq!(SqlType::TimestampWithTimeZone.udt_name(), "timestamptz");
         assert_eq!(SqlType::Jsonb.oid(), 3802);
+    }
+
+    #[test]
+    fn projects_multiple_collections_without_cross_table_column_leakage() {
+        let profiles = BTreeMap::from([
+            (
+                "customers".to_owned(),
+                SchemaProfile::infer(&[document([("name", SampleValue::String("Amina".into()))])]),
+            ),
+            (
+                "orders".to_owned(),
+                SchemaProfile::infer(&[document([("total", SampleValue::Integer(42))])]),
+            ),
+        ]);
+
+        let catalog = project_public_collections(&profiles);
+        let tables = catalog
+            .tables()
+            .map(|table| table.table.table_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(tables, vec!["customers", "orders"]);
+
+        let customers = catalog.table("customers").expect("customers table exists");
+        assert_eq!(customers.columns.len(), 1);
+        assert_eq!(customers.columns[0].column_name, "name");
+        assert_eq!(customers.columns[0].sql_type, SqlType::Text);
+
+        let orders = catalog.table("orders").expect("orders table exists");
+        assert_eq!(orders.columns.len(), 1);
+        assert_eq!(orders.columns[0].column_name, "total");
+        assert_eq!(orders.columns[0].sql_type, SqlType::BigInt);
+        assert!(catalog.table("missing").is_none());
+
+        let columns = catalog
+            .columns()
+            .map(|column| {
+                (
+                    column.table.table_name.as_str(),
+                    column.column_name.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(columns, vec![("customers", "name"), ("orders", "total")]);
     }
 }

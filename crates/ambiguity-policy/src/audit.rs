@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use super::{AmbiguityKind, ResolverDecision, WriteAmbiguity};
+use super::{AmbiguityKind, ResolutionCandidate, WriteAmbiguity};
 
 /// The kind of write for which an ambiguity decision was considered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,10 +121,10 @@ pub struct AmbiguityAuditRecord {
     pub operation: AuditOperation,
     /// Field-level ambiguity metadata only; no sampled BSON values are kept.
     pub ambiguities: Vec<RedactedAmbiguity>,
-    /// Decisions computed by Rust before contacting the resolver.
-    pub allowed_decisions: BTreeSet<ResolverDecision>,
-    /// The allowlisted decision selected for this attempt, if a response was accepted.
-    pub selected_decision: Option<ResolverDecision>,
+    /// Candidate IDs computed by Rust before contacting the resolver.
+    pub allowed_candidates: BTreeSet<ResolutionCandidate>,
+    /// The allowlisted candidate selected for this attempt, if a response was accepted.
+    pub selected_candidate: Option<ResolutionCandidate>,
     /// The accepted resolver confidence, if a response was accepted.
     pub confidence: Option<ResolverConfidence>,
     pub outcome: AuditOutcome,
@@ -137,8 +137,8 @@ impl AmbiguityAuditRecord {
         schema_profile_version: u32,
         operation: AuditOperation,
         ambiguities: impl IntoIterator<Item = RedactedAmbiguity>,
-        allowed_decisions: BTreeSet<ResolverDecision>,
-        selected_decision: Option<ResolverDecision>,
+        allowed_candidates: BTreeSet<ResolutionCandidate>,
+        selected_candidate: Option<ResolutionCandidate>,
         confidence: Option<ResolverConfidence>,
         outcome: AuditOutcome,
     ) -> Self {
@@ -146,8 +146,8 @@ impl AmbiguityAuditRecord {
             schema_profile_version,
             operation,
             ambiguities: ambiguities.into_iter().collect(),
-            allowed_decisions,
-            selected_decision,
+            allowed_candidates,
+            selected_candidate,
             confidence,
             outcome,
         }
@@ -164,7 +164,7 @@ mod tests {
         AmbiguityAuditRecord, AuditOperation, AuditOutcome, AuditWriteCounts, RedactedAmbiguity,
         ResolverConfidence,
     };
-    use crate::{AmbiguityKind, ResolverDecision, WriteAmbiguity};
+    use crate::{AmbiguityKind, ResolutionCandidate, WriteAmbiguity};
 
     #[test]
     fn redacted_ambiguity_keeps_policy_metadata_but_not_schema_values() {
@@ -199,8 +199,11 @@ mod tests {
                 field_path: "profile.city".to_owned(),
                 kinds: BTreeSet::from([AmbiguityKind::MissingFromSampledDocuments]),
             }],
-            BTreeSet::from([ResolverDecision::Reject, ResolverDecision::UseNestedPath]),
-            Some(ResolverDecision::UseNestedPath),
+            BTreeSet::from([
+                ResolutionCandidate::Reject,
+                ResolutionCandidate::UseNestedPath,
+            ]),
+            Some(ResolutionCandidate::UseNestedPath),
             Some(confidence),
             AuditOutcome::Executed(AuditWriteCounts {
                 matched: 1,
@@ -215,12 +218,12 @@ mod tests {
         assert_eq!(record.ambiguities[0].field_path, "profile.city");
         assert!(
             record
-                .allowed_decisions
-                .contains(&ResolverDecision::UseNestedPath)
+                .allowed_candidates
+                .contains(&ResolutionCandidate::UseNestedPath)
         );
         assert_eq!(
-            record.selected_decision,
-            Some(ResolverDecision::UseNestedPath)
+            record.selected_candidate,
+            Some(ResolutionCandidate::UseNestedPath)
         );
         assert_eq!(
             record.confidence.expect("stored confidence").basis_points(),

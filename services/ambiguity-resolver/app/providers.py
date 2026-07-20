@@ -12,7 +12,12 @@ from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 
-from .contract import AmbiguityRequest, AmbiguityResponse, Resolution, ResolutionAdvisor
+from .contract import (
+    AmbiguityRequest,
+    AmbiguityResponse,
+    ResolutionAdvisor,
+    ResolutionCandidate,
+)
 
 
 # The repository ignores `.env`; loading it here makes provider credentials
@@ -50,7 +55,7 @@ class ProviderSettings:
             provider=os.getenv("AMBIGUITY_LLM_PROVIDER", "google").lower(),
             timeout_seconds=timeout_ms / 1000,
             google_api_key=os.getenv("GEMINI_API_KEY"),
-            google_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            google_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
             google_base_url=os.getenv(
                 "GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com"
             ).rstrip("/"),
@@ -66,16 +71,23 @@ class DeterministicAdvisor:
     """A side-effect-free fallback for local contract development only."""
 
     def recommend(self, request: AmbiguityRequest) -> AmbiguityResponse:
-        if Resolution.USE_NESTED_PATH in request.allowed_decisions:
-            decision = Resolution.USE_NESTED_PATH
+        if ResolutionCandidate.PARSE_INTEGER_LOSSLESSLY in request.allowed_candidates:
+            candidate = ResolutionCandidate.PARSE_INTEGER_LOSSLESSLY
+            rationale = "Rust supplied a lossless integer candidate for this mixed scalar field."
+        elif ResolutionCandidate.KEEP_STRING in request.allowed_candidates:
+            candidate = ResolutionCandidate.KEEP_STRING
+            rationale = "Rust supplied a string-preserving candidate for this mixed scalar field."
+        elif ResolutionCandidate.USE_NESTED_PATH in request.allowed_candidates:
+            candidate = ResolutionCandidate.USE_NESTED_PATH
             rationale = "Schema evidence permits the deterministic nested-path write."
         else:
-            decision = Resolution.REJECT
+            candidate = ResolutionCandidate.REJECT
             rationale = "The requested ambiguity has no safe MVP resolution."
         return AmbiguityResponse(
             schema_profile_version=request.schema_profile_version,
+            operation=request.operation,
             target_path=request.target_path,
-            decision=decision,
+            candidate=candidate,
             confidence=1.0,
             rationale=rationale,
         )
@@ -164,9 +176,10 @@ class OpenAIResponsesAdvisor:
 
 _SYSTEM_INSTRUCTION = """You are a constrained write-ambiguity advisor.
 Return only the JSON object required by the response schema. You may select only
-one decision in allowed_decisions and must echo contract_version,
-schema_profile_version, and target_path exactly. Never propose MongoDB commands,
-aggregation pipelines, operators, paths, or type coercions. Reject when unsure."""
+one candidate in allowed_candidates and must echo contract_version,
+schema_profile_version, operation, and target_path exactly. Never propose MongoDB commands,
+aggregation pipelines, operators, paths, or type coercions. The candidate IDs
+are defined by Rust; never invent an ID. Reject when unsure."""
 
 
 def _prompt(request: AmbiguityRequest) -> str:
@@ -182,20 +195,30 @@ def _response_schema() -> dict[str, Any]:
         "required": [
             "contract_version",
             "schema_profile_version",
+            "operation",
             "target_path",
-            "decision",
+            "candidate",
             "confidence",
             "rationale",
         ],
         "properties": {
-            "contract_version": {"type": "string", "enum": ["v1"]},
+            "contract_version": {"type": "string", "enum": ["v2"]},
             "schema_profile_version": {"type": "integer", "minimum": 1},
+            "operation": {"type": "string", "enum": ["insert", "update", "delete"]},
             "target_path": {
                 "type": "array",
                 "minItems": 1,
                 "items": {"type": "string"},
             },
-            "decision": {"type": "string", "enum": ["use_nested_path", "reject"]},
+            "candidate": {
+                "type": "string",
+                "enum": [
+                    "keep_string",
+                    "parse_integer_losslessly",
+                    "use_nested_path",
+                    "reject",
+                ],
+            },
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             # Pydantic applies the length bounds after provider output. Keeping
             # the provider schema to the Gemini-supported JSON Schema subset
@@ -213,13 +236,22 @@ def _gemini_response_schema() -> dict[str, Any]:
         "type": "object",
         "required": strict_schema["required"],
         "properties": {
-            "contract_version": {"type": "string", "enum": ["v1"]},
+            "contract_version": {"type": "string", "enum": ["v2"]},
             "schema_profile_version": {"type": "integer"},
+            "operation": {"type": "string", "enum": ["insert", "update", "delete"]},
             "target_path": {
                 "type": "array",
                 "items": {"type": "string"},
             },
-            "decision": {"type": "string", "enum": ["use_nested_path", "reject"]},
+            "candidate": {
+                "type": "string",
+                "enum": [
+                    "keep_string",
+                    "parse_integer_losslessly",
+                    "use_nested_path",
+                    "reject",
+                ],
+            },
             "confidence": {"type": "number"},
             "rationale": {"type": "string"},
         },

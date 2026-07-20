@@ -8,7 +8,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-CONTRACT_VERSION = "v1"
+CONTRACT_VERSION = "v2"
 
 
 class StrictModel(BaseModel):
@@ -25,9 +25,11 @@ class WriteOperation(StrEnum):
     DELETE = "delete"
 
 
-class Resolution(StrEnum):
-    """The complete MVP decision allowlist shared with the Rust proxy."""
+class ResolutionCandidate(StrEnum):
+    """Rust-owned candidate IDs; none contains executable MongoDB syntax."""
 
+    KEEP_STRING = "keep_string"
+    PARSE_INTEGER_LOSSLESSLY = "parse_integer_losslessly"
     USE_NESTED_PATH = "use_nested_path"
     REJECT = "reject"
 
@@ -87,43 +89,57 @@ class AmbiguityEvidence(StrictModel):
 class AmbiguityRequest(StrictModel):
     """A versioned request produced from Rust-calculated schema evidence."""
 
-    contract_version: Literal["v1"] = CONTRACT_VERSION
+    contract_version: Literal["v2"] = CONTRACT_VERSION
     schema_profile_version: int = Field(ge=1)
     operation: WriteOperation
     target_path: list[str] = Field(min_length=1, max_length=64)
     ambiguity: AmbiguityEvidence
-    allowed_decisions: list[Resolution] = Field(min_length=1, max_length=2)
+    allowed_candidates: list[ResolutionCandidate] = Field(min_length=1, max_length=3)
 
     @model_validator(mode="after")
     def validate_allowlist_and_path(self) -> AmbiguityRequest:
-        """Reject caller-provided decisions that Rust would never issue."""
+        """Reject candidate IDs Rust could not have safely generated."""
 
         if any(not segment or len(segment) > 255 for segment in self.target_path):
             raise ValueError("target path segments must be non-empty and at most 255 characters")
-        if len(set(self.allowed_decisions)) != len(self.allowed_decisions):
-            raise ValueError("allowed decisions must be unique")
-        if Resolution.REJECT not in self.allowed_decisions:
-            raise ValueError("allowed decisions must include reject")
+        if len(set(self.allowed_candidates)) != len(self.allowed_candidates):
+            raise ValueError("allowed candidates must be unique")
+        if ResolutionCandidate.REJECT not in self.allowed_candidates:
+            raise ValueError("allowed candidates must include reject")
 
         safe_nested_kinds = {AmbiguityKind.MISSING_FROM_SAMPLED_DOCUMENTS}
         if (
-            Resolution.USE_NESTED_PATH in self.allowed_decisions
+            ResolutionCandidate.USE_NESTED_PATH in self.allowed_candidates
             and (
                 set(self.ambiguity.kinds) != safe_nested_kinds
                 or len(self.target_path) < 2
             )
         ):
             raise ValueError("use_nested_path is not valid for the supplied ambiguity kinds")
+        type_candidates = {
+            ResolutionCandidate.KEEP_STRING,
+            ResolutionCandidate.PARSE_INTEGER_LOSSLESSLY,
+        }
+        if type_candidates.intersection(self.allowed_candidates) and (
+            set(self.ambiguity.kinds) != {AmbiguityKind.MIXED_BSON_TYPES}
+            or set(self.ambiguity.observed_types)
+            != {ObservedType.INTEGER, ObservedType.STRING}
+            or set(self.ambiguity.observed_shapes) != {ObservedShape.SCALAR}
+            or self.ambiguity.missing_documents != 0
+            or len(self.target_path) != 1
+        ):
+            raise ValueError("mixed-type candidates are not valid for the supplied evidence")
         return self
 
 
 class AmbiguityResponse(StrictModel):
-    """A non-executable, correlation-safe recommendation for Rust to revalidate."""
+    """A non-executable candidate selection for Rust to revalidate."""
 
-    contract_version: Literal["v1"] = CONTRACT_VERSION
+    contract_version: Literal["v2"] = CONTRACT_VERSION
     schema_profile_version: int = Field(ge=1)
+    operation: WriteOperation
     target_path: list[str] = Field(min_length=1, max_length=64)
-    decision: Resolution
+    candidate: ResolutionCandidate
     confidence: float = Field(ge=0.0, le=1.0)
     rationale: str = Field(min_length=1, max_length=500)
 

@@ -20,6 +20,12 @@ pub const METADATA_COLLECTION: &str = "__pgproxy_schema";
 /// Result type returned by the `MongoDB` integration boundary.
 pub type DiscoveryResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
+/// Profiles indexed by their allowlisted source collection name.
+///
+/// A `BTreeMap` keeps discovery and catalog output deterministic regardless of
+/// the order in which collection names were configured.
+pub type CollectionProfiles = BTreeMap<String, SchemaProfile>;
+
 /// A sampled document represented without a database-driver dependency.
 pub type SampleDocument = BTreeMap<String, SampleValue>;
 
@@ -230,6 +236,37 @@ pub async fn discover_and_persist_collection(
     Ok(profile)
 }
 
+/// Discovers and persists one profile for every configured collection.
+///
+/// Collection names are validated before any collection is sampled, so an
+/// invalid allowlist cannot leave a partially refreshed metadata set. Each
+/// successful profile remains independently persisted under its collection
+/// name, allowing callers to load and route it without schema inference at
+/// query time.
+///
+/// # Errors
+///
+/// Returns an error when the allowlist is empty or invalid, or when sampling
+/// or persisting any configured collection fails.
+pub async fn discover_and_persist_collections(
+    client: &Client,
+    database_name: &str,
+    collection_names: &[String],
+    sample_size: usize,
+) -> DiscoveryResult<CollectionProfiles> {
+    let collection_names = validated_collection_names(collection_names)?;
+    let mut profiles = CollectionProfiles::new();
+
+    for collection_name in collection_names {
+        let profile =
+            discover_and_persist_collection(client, database_name, &collection_name, sample_size)
+                .await?;
+        profiles.insert(collection_name, profile);
+    }
+
+    Ok(profiles)
+}
+
 /// Upserts one profile per source collection in the metadata collection.
 ///
 /// # Errors
@@ -285,6 +322,77 @@ pub async fn load_persisted_profile(
         .transpose()
         .map(|stored| stored.map(|record| record.profile))
         .map_err(Into::into)
+}
+
+/// Loads the persisted profiles for every configured collection.
+///
+/// A missing collection profile is an error rather than a reason to infer at
+/// query time. This makes the configured collection allowlist and the schema
+/// used to route a statement explicit and reproducible.
+///
+/// # Errors
+///
+/// Returns an error when the allowlist is invalid, a metadata record cannot be
+/// read or decoded, or any configured collection has no persisted profile.
+pub async fn load_required_persisted_profiles(
+    database: &Database,
+    collection_names: &[String],
+) -> DiscoveryResult<CollectionProfiles> {
+    let collection_names = validated_collection_names(collection_names)?;
+    let mut profiles = CollectionProfiles::new();
+
+    for collection_name in collection_names {
+        let profile = load_persisted_profile(database, &collection_name)
+            .await?
+            .ok_or_else(|| {
+                format!(
+                    "no persisted schema profile for '{collection_name}'; run mongo-pg-schema-discovery first"
+                )
+            })?;
+        profiles.insert(collection_name, profile);
+    }
+
+    Ok(profiles)
+}
+
+/// Validates and canonicalizes the configured source-collection allowlist.
+///
+/// Empty names, duplicates, and the internal metadata collection are rejected
+/// before discovery or proxy startup. The returned ordering is deterministic.
+///
+/// # Errors
+///
+/// Returns an error when no names are supplied or a name is invalid.
+pub fn validated_collection_names(collection_names: &[String]) -> DiscoveryResult<Vec<String>> {
+    if collection_names.is_empty() {
+        return Err("at least one MongoDB collection must be configured".into());
+    }
+
+    let mut names = BTreeSet::new();
+    for collection_name in collection_names {
+        if collection_name.trim().is_empty() {
+            return Err("MongoDB collection names must not be empty".into());
+        }
+        if collection_name != collection_name.trim() {
+            return Err(format!(
+                "MongoDB collection name '{collection_name}' must not have leading or trailing whitespace"
+            )
+            .into());
+        }
+        if collection_name == METADATA_COLLECTION {
+            return Err(format!(
+                "'{METADATA_COLLECTION}' is reserved for schema metadata and cannot be exposed as a SQL table"
+            )
+            .into());
+        }
+        if !names.insert(collection_name.clone()) {
+            return Err(
+                format!("duplicate configured MongoDB collection: '{collection_name}'").into(),
+            );
+        }
+    }
+
+    Ok(names.into_iter().collect())
 }
 
 /// Converts a driver document into the pure input model used by inference.
@@ -378,8 +486,8 @@ fn sample_value_from_bson(value: &Bson) -> SampleValue {
 #[cfg(test)]
 mod tests {
     use super::{
-        FieldPath, ObservedShape, ObservedType, SampleDocument, SampleValue, SchemaProfile,
-        sample_document_from_bson,
+        FieldPath, METADATA_COLLECTION, ObservedShape, ObservedType, SampleDocument, SampleValue,
+        SchemaProfile, sample_document_from_bson, validated_collection_names,
     };
     use mongodb::bson::doc;
 
@@ -483,5 +591,25 @@ mod tests {
                 .field(&FieldPath::top_level("profile").child("city"))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn canonicalizes_a_multi_collection_allowlist_in_deterministic_order() {
+        let names = validated_collection_names(&["orders".to_owned(), "customers".to_owned()])
+            .expect("allowlist should be valid");
+
+        assert_eq!(names, vec!["customers", "orders"]);
+    }
+
+    #[test]
+    fn rejects_invalid_or_reserved_collection_allowlist_entries() {
+        for collections in [
+            Vec::new(),
+            vec!["customers".to_owned(), "customers".to_owned()],
+            vec![" customers".to_owned()],
+            vec![METADATA_COLLECTION.to_owned()],
+        ] {
+            assert!(validated_collection_names(&collections).is_err());
+        }
     }
 }

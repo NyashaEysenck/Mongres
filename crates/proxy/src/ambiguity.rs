@@ -6,7 +6,7 @@
 use std::{collections::BTreeSet, sync::Mutex};
 
 use mongo_pg_ambiguity_policy::{
-    ResolverDecision, WriteAmbiguity, apply_resolution,
+    ResolutionCandidate, WriteAmbiguity, apply_resolution,
     audit::{
         AmbiguityAuditRecord, AuditFailure, AuditOperation, AuditOutcome, AuditWriteCounts,
         RedactedAmbiguity, ResolverConfidence,
@@ -32,8 +32,8 @@ pub(crate) struct ResolvedWrite {
 pub(crate) struct AuditContext {
     operation: AuditOperation,
     ambiguities: Vec<RedactedAmbiguity>,
-    allowed_decisions: BTreeSet<ResolverDecision>,
-    selected_decision: ResolverDecision,
+    allowed_candidates: BTreeSet<ResolutionCandidate>,
+    selected_candidate: ResolutionCandidate,
     confidence: ResolverConfidence,
 }
 
@@ -63,7 +63,7 @@ pub(crate) async fn resolve_write_plan(
             schema,
             audit_operation(operation),
             &ambiguities,
-            BTreeSet::from([ResolverDecision::Reject]),
+            BTreeSet::from([ResolutionCandidate::Reject]),
             AuditFailure::NoSafeResolution,
             audit_records,
         );
@@ -71,16 +71,13 @@ pub(crate) async fn resolve_write_plan(
     }
 
     let ambiguity = &ambiguities[0];
-    let request = resolver_request(operation, schema.profile_version, ambiguity);
-    if !request
-        .allowed_decisions
-        .contains(&ResolverDecision::UseNestedPath)
-    {
+    let request = resolver_request(&plan, operation, schema.profile_version, ambiguity);
+    if !has_executable_candidate(&request.allowed_candidates) {
         record_blocked(
             schema,
             audit_operation(operation),
             &ambiguities,
-            request.allowed_decisions,
+            request.allowed_candidates,
             AuditFailure::NoSafeResolution,
             audit_records,
         );
@@ -94,7 +91,7 @@ pub(crate) async fn resolve_write_plan(
                 schema,
                 audit_operation(operation),
                 &ambiguities,
-                request.allowed_decisions,
+                request.allowed_candidates,
                 AuditFailure::ResolverUnavailable,
                 audit_records,
             );
@@ -103,14 +100,15 @@ pub(crate) async fn resolve_write_plan(
     };
     let confidence = ResolverConfidence::from_ratio(response.confidence);
     let resolution =
-        match validate_resolver_response(&request, ambiguity, &response, minimum_confidence) {
+        match validate_resolver_response(&request, &plan, ambiguity, &response, minimum_confidence)
+        {
             Ok(resolution) => resolution,
             Err(error) => {
                 record_blocked(
                     schema,
                     audit_operation(operation),
                     &ambiguities,
-                    request.allowed_decisions.clone(),
+                    request.allowed_candidates.clone(),
                     validation_failure(&request, &response, minimum_confidence),
                     audit_records,
                 );
@@ -124,7 +122,7 @@ pub(crate) async fn resolve_write_plan(
                 schema,
                 audit_operation(operation),
                 &ambiguities,
-                request.allowed_decisions.clone(),
+                request.allowed_candidates.clone(),
                 AuditFailure::ResolverRejected,
                 audit_records,
             );
@@ -143,10 +141,21 @@ pub(crate) async fn resolve_write_plan(
         audit_context: Some(AuditContext {
             operation: audit_operation(operation),
             ambiguities: ambiguities.iter().map(RedactedAmbiguity::from).collect(),
-            allowed_decisions: request.allowed_decisions,
-            selected_decision: resolution.decision,
+            allowed_candidates: request.allowed_candidates,
+            selected_candidate: resolution.candidate,
             confidence,
         }),
+    })
+}
+
+fn has_executable_candidate(candidates: &BTreeSet<ResolutionCandidate>) -> bool {
+    candidates.iter().any(|candidate| {
+        matches!(
+            candidate,
+            ResolutionCandidate::UseNestedPath
+                | ResolutionCandidate::KeepString
+                | ResolutionCandidate::ParseIntegerLosslessly
+        )
     })
 }
 
@@ -166,8 +175,8 @@ pub(crate) fn record_execution(
             schema.profile_version,
             context.operation,
             context.ambiguities.clone(),
-            context.allowed_decisions.clone(),
-            Some(context.selected_decision),
+            context.allowed_candidates.clone(),
+            Some(context.selected_candidate),
             Some(context.confidence),
             AuditOutcome::Executed(AuditWriteCounts {
                 matched: outcome.matched,
@@ -194,8 +203,8 @@ pub(crate) fn record_mongo_execution_failure(
             schema.profile_version,
             context.operation,
             context.ambiguities.clone(),
-            context.allowed_decisions.clone(),
-            Some(context.selected_decision),
+            context.allowed_candidates.clone(),
+            Some(context.selected_candidate),
             Some(context.confidence),
             AuditOutcome::Blocked(AuditFailure::MongoExecutionFailed),
         ),
@@ -206,7 +215,7 @@ fn record_blocked(
     schema: &SchemaProfile,
     operation: AuditOperation,
     ambiguities: &[WriteAmbiguity],
-    allowed_decisions: BTreeSet<ResolverDecision>,
+    allowed_candidates: BTreeSet<ResolutionCandidate>,
     failure: AuditFailure,
     audit_records: &Mutex<Vec<AmbiguityAuditRecord>>,
 ) {
@@ -216,7 +225,7 @@ fn record_blocked(
             schema.profile_version,
             operation,
             ambiguities.iter().map(RedactedAmbiguity::from),
-            allowed_decisions,
+            allowed_candidates,
             None,
             None,
             AuditOutcome::Blocked(failure),

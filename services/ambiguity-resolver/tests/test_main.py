@@ -11,7 +11,7 @@ from app.main import (
     AmbiguityResponse,
     ObservedShape,
     ObservedType,
-    Resolution,
+    ResolutionCandidate,
     WriteOperation,
     validate_recommendation,
 )
@@ -29,11 +29,53 @@ def nested_path_request() -> AmbiguityRequest:
             observed_shapes=[ObservedShape.SCALAR],
             missing_documents=2,
         ),
-        allowed_decisions=[Resolution.USE_NESTED_PATH, Resolution.REJECT],
+        allowed_candidates=[
+            ResolutionCandidate.USE_NESTED_PATH,
+            ResolutionCandidate.REJECT,
+        ],
     )
 
 
 class ResolverContractTests(unittest.TestCase):
+    def test_mixed_type_candidates_require_exact_scalar_evidence(self) -> None:
+        request = AmbiguityRequest(
+            schema_profile_version=7,
+            operation=WriteOperation.UPDATE,
+            target_path=["status"],
+            ambiguity=AmbiguityEvidence(
+                kinds=[AmbiguityKind.MIXED_BSON_TYPES],
+                observed_types=[ObservedType.INTEGER, ObservedType.STRING],
+                observed_shapes=[ObservedShape.SCALAR],
+                missing_documents=0,
+            ),
+            allowed_candidates=[
+                ResolutionCandidate.KEEP_STRING,
+                ResolutionCandidate.PARSE_INTEGER_LOSSLESSLY,
+                ResolutionCandidate.REJECT,
+            ],
+        )
+        self.assertIn(
+            ResolutionCandidate.PARSE_INTEGER_LOSSLESSLY,
+            request.allowed_candidates,
+        )
+
+        with self.assertRaises(ValidationError):
+            AmbiguityRequest(
+                schema_profile_version=7,
+                operation=WriteOperation.UPDATE,
+                target_path=["status"],
+                ambiguity=AmbiguityEvidence(
+                    kinds=[AmbiguityKind.MIXED_BSON_TYPES],
+                    observed_types=[ObservedType.INTEGER, ObservedType.STRING],
+                    observed_shapes=[ObservedShape.SCALAR],
+                    missing_documents=1,
+                ),
+                allowed_candidates=[
+                    ResolutionCandidate.PARSE_INTEGER_LOSSLESSLY,
+                    ResolutionCandidate.REJECT,
+                ],
+            )
+
     def test_use_nested_path_requires_safe_ambiguity_kinds(self) -> None:
         with self.assertRaises(ValidationError):
             AmbiguityRequest(
@@ -46,7 +88,10 @@ class ResolverContractTests(unittest.TestCase):
                     observed_shapes=[ObservedShape.SCALAR],
                     missing_documents=0,
                 ),
-                allowed_decisions=[Resolution.USE_NESTED_PATH, Resolution.REJECT],
+                allowed_candidates=[
+                    ResolutionCandidate.USE_NESTED_PATH,
+                    ResolutionCandidate.REJECT,
+                ],
             )
 
     def test_use_nested_path_requires_a_nested_target_path(self) -> None:
@@ -61,15 +106,32 @@ class ResolverContractTests(unittest.TestCase):
                     observed_shapes=[ObservedShape.SCALAR],
                     missing_documents=1,
                 ),
-                allowed_decisions=[Resolution.USE_NESTED_PATH, Resolution.REJECT],
+                allowed_candidates=[
+                    ResolutionCandidate.USE_NESTED_PATH,
+                    ResolutionCandidate.REJECT,
+                ],
             )
 
     def test_recommendation_cannot_change_target_or_profile_version(self) -> None:
         request = nested_path_request()
         recommendation = AmbiguityResponse(
             schema_profile_version=8,
+            operation=request.operation,
             target_path=request.target_path,
-            decision=Resolution.USE_NESTED_PATH,
+            candidate=ResolutionCandidate.USE_NESTED_PATH,
+            confidence=1.0,
+            rationale="irrelevant",
+        )
+        with self.assertRaises(ValueError):
+            validate_recommendation(request, recommendation)
+
+    def test_recommendation_cannot_change_operation(self) -> None:
+        request = nested_path_request()
+        recommendation = AmbiguityResponse(
+            schema_profile_version=request.schema_profile_version,
+            operation=WriteOperation.DELETE,
+            target_path=request.target_path,
+            candidate=ResolutionCandidate.USE_NESTED_PATH,
             confidence=1.0,
             rationale="irrelevant",
         )
@@ -78,11 +140,14 @@ class ResolverContractTests(unittest.TestCase):
 
     def test_recommendation_cannot_escape_the_rust_allowlist(self) -> None:
         request = nested_path_request()
-        request = request.model_copy(update={"allowed_decisions": [Resolution.REJECT]})
+        request = request.model_copy(
+            update={"allowed_candidates": [ResolutionCandidate.REJECT]}
+        )
         recommendation = AmbiguityResponse(
             schema_profile_version=request.schema_profile_version,
+            operation=request.operation,
             target_path=request.target_path,
-            decision=Resolution.USE_NESTED_PATH,
+            candidate=ResolutionCandidate.USE_NESTED_PATH,
             confidence=1.0,
             rationale="safe",
         )

@@ -1,9 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mongo_pg_common::ErrorKind;
 use mongo_pg_schema_discovery::{FieldPath, FieldProfile, ObservedShape, ObservedType};
 
-use crate::{ComparisonOperator, Predicate, Projection, SqlValue, StatementPlan, parse_sql};
+use crate::{
+    ComparisonOperator, Predicate, Projection, SqlValue, StatementPlan, bind_parameters, parse_sql,
+    parse_sql_for_profiles,
+};
 
 fn schema() -> mongo_pg_schema_discovery::SchemaProfile {
     let fields = [
@@ -28,6 +31,28 @@ fn schema() -> mongo_pg_schema_discovery::SchemaProfile {
     mongo_pg_schema_discovery::SchemaProfile {
         profile_version: 1,
         sampled_documents: 2,
+        fields,
+    }
+}
+
+fn orders_schema() -> mongo_pg_schema_discovery::SchemaProfile {
+    let fields = [
+        (FieldPath::top_level("order_total"), ObservedType::Integer),
+        (FieldPath::top_level("reference"), ObservedType::String),
+    ]
+    .into_iter()
+    .map(|(path, observed_type)| FieldProfile {
+        path,
+        present_documents: 1,
+        missing_documents: 0,
+        observed_types: BTreeSet::from([observed_type]),
+        observed_shapes: BTreeSet::from([ObservedShape::Scalar]),
+        has_dotted_key_collision: false,
+    })
+    .collect();
+    mongo_pg_schema_discovery::SchemaProfile {
+        profile_version: 1,
+        sampled_documents: 1,
         fields,
     }
 }
@@ -176,4 +201,89 @@ fn preserves_ambiguous_write_fields_for_the_policy_layer() {
     )
     .expect("the policy layer must receive the typed ambiguous write plan");
     assert!(matches!(plan, StatementPlan::Update(_)));
+}
+
+#[test]
+fn binds_postgresql_placeholders_and_revalidates_the_completed_plan() {
+    let plan = parse_sql(
+        "UPDATE customers SET active = $1 WHERE status = $2",
+        "customers",
+        &schema(),
+    )
+    .expect("placeholder plan should parse");
+
+    let bound = bind_parameters(
+        plan,
+        &[SqlValue::Boolean(false), SqlValue::Integer(2)],
+        &schema(),
+    )
+    .expect("typed parameters should bind");
+
+    assert!(matches!(
+        bound,
+        StatementPlan::Update(plan)
+            if plan.assignments[0].value == SqlValue::Boolean(false)
+                && matches!(plan.filter, Predicate::Compare { value: SqlValue::Integer(2), .. })
+    ));
+}
+
+#[test]
+fn rejects_missing_extra_or_schema_incompatible_bound_parameters() {
+    let plan = parse_sql(
+        "UPDATE customers SET active = $1 WHERE status = $2",
+        "customers",
+        &schema(),
+    )
+    .expect("placeholder plan should parse");
+    let missing = bind_parameters(plan.clone(), &[SqlValue::Boolean(false)], &schema())
+        .expect_err("all placeholder values are required");
+    assert_eq!(missing.kind, ErrorKind::InvalidInput);
+
+    let extra = bind_parameters(
+        plan.clone(),
+        &[
+            SqlValue::Boolean(false),
+            SqlValue::Integer(2),
+            SqlValue::String("extra".to_owned()),
+        ],
+        &schema(),
+    )
+    .expect_err("extra parameter values are rejected");
+    assert_eq!(extra.kind, ErrorKind::InvalidInput);
+
+    let incompatible = bind_parameters(
+        plan,
+        &[SqlValue::String("false".to_owned()), SqlValue::Integer(2)],
+        &schema(),
+    )
+    .expect_err("bound values must use inferred BSON types");
+    assert_eq!(incompatible.kind, ErrorKind::InvalidInput);
+}
+
+#[test]
+fn routes_statements_to_the_exact_allowlisted_collection_profile() {
+    let profiles = BTreeMap::from([
+        ("customers".to_owned(), schema()),
+        ("orders".to_owned(), orders_schema()),
+    ]);
+
+    let plan = parse_sql_for_profiles(
+        "UPDATE orders SET order_total = 42 WHERE reference = 'ORD-1'",
+        &profiles,
+    )
+    .expect("orders statement should use orders profile");
+    assert!(matches!(
+        plan,
+        StatementPlan::Update(plan)
+            if plan.collection == "orders"
+                && plan.assignments[0].path == FieldPath::top_level("order_total")
+    ));
+
+    let cross_collection_field = parse_sql_for_profiles("SELECT name FROM orders", &profiles)
+        .expect_err("customers fields must not leak into orders");
+    assert_eq!(cross_collection_field.kind, ErrorKind::InvalidInput);
+
+    let unallowlisted = parse_sql_for_profiles("SELECT * FROM invoices", &profiles)
+        .expect_err("unknown table must be rejected before lowering");
+    assert_eq!(unallowlisted.kind, ErrorKind::InvalidInput);
 }

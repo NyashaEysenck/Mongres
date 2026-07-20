@@ -12,7 +12,7 @@ from .contract import (
     AmbiguityResponse,
     ObservedShape,
     ObservedType,
-    Resolution,
+    ResolutionCandidate,
     ResolutionAdvisor,
     WriteOperation,
 )
@@ -31,10 +31,12 @@ def validate_recommendation(
 
     if recommendation.schema_profile_version != request.schema_profile_version:
         raise ValueError("recommendation schema profile version does not match the request")
+    if recommendation.operation != request.operation:
+        raise ValueError("recommendation operation does not match the request")
     if recommendation.target_path != request.target_path:
         raise ValueError("recommendation target path does not match the request")
-    if recommendation.decision not in request.allowed_decisions:
-        raise ValueError("recommendation decision is not in the request allowlist")
+    if recommendation.candidate not in request.allowed_candidates:
+        raise ValueError("recommendation candidate is not in the request allowlist")
     return recommendation
 
 
@@ -79,7 +81,7 @@ __all__ = [
     "DeterministicAdvisor",
     "ObservedShape",
     "ObservedType",
-    "Resolution",
+    "ResolutionCandidate",
     "ResolutionAdvisor",
     "WriteOperation",
     "create_app",

@@ -49,7 +49,7 @@ First discover and persist a profile for the collection you want to expose:
 ```bash
 MONGO_URI=mongodb://localhost:27017 \
 MONGO_DATABASE=demo \
-MONGO_COLLECTION=customers \
+MONGO_COLLECTIONS=customers,ambiguous_profiles \
 cargo run -p mongo-pg-schema-discovery
 ```
 
@@ -59,7 +59,7 @@ simple-query protocol:
 ```bash
 MONGO_URI=mongodb://localhost:27017 \
 MONGO_DATABASE=demo \
-MONGO_COLLECTION=customers \
+MONGO_COLLECTIONS=customers,ambiguous_profiles \
 PROXY_LISTEN_ADDR=127.0.0.1:5433 \
 cargo run -p mongo-pg-proxy
 
@@ -67,9 +67,9 @@ psql 'postgresql://localhost:5433/demo?sslmode=disable'
 ```
 
 Within `psql`, `\dt`, `information_schema.columns`, and the supported
-`SELECT`/`INSERT`/`UPDATE`/`DELETE` subset work against the active MongoDB
-collection. Quote nested field names in an `INSERT` column list because the
-PostgreSQL grammar accepts each column there as one identifier:
+`SELECT`/`INSERT`/`UPDATE`/`DELETE` subset work against their matching
+allowlisted MongoDB collection. Quote nested field names in an `INSERT` column
+list because the PostgreSQL grammar accepts each column there as one identifier:
 
 ```sql
 INSERT INTO customers (name, "profile.address.city")
@@ -143,7 +143,9 @@ service, and then the proxy. Schema discovery must exit successfully before the
 proxy starts, so its catalog and SQL field validation always use a persisted
 profile. The stack uses the internal `mongodb` and `ambiguity-resolver` host
 names; host-side connection settings in `.env` cannot accidentally redirect a
-container to a different database.
+container to a different database. MongoDB, the resolver, and the proxy each
+have Compose health checks; the proxy is ready only after it has loaded the
+persisted schema and is accepting PostgreSQL connections.
 
 To refresh a schema profile after changing demo data, rerun only discovery and
 restart the proxy:
@@ -169,7 +171,8 @@ write. After each write, it reads the target document from MongoDB with
 `mongosh`; persistence is proved independently of the proxy response.
 
 It deliberately targets the seeded `demo.customers` collection, regardless of
-any local `MONGO_DATABASE` or `MONGO_COLLECTION` settings. The script needs a
+any local `MONGO_DATABASE`, `MONGO_COLLECTIONS`, or legacy `MONGO_COLLECTION`
+settings. The script needs a
 valid Google or OpenAI provider key because its final write is intentionally
 ambiguous and must fail closed if the resolver cannot return a validated
 decision.

@@ -10,7 +10,7 @@ use mongo_pg_common::{ErrorKind, ProxyError};
 use reqwest::{Client, Url};
 
 pub use mongo_pg_ambiguity_policy::{
-    RESOLUTION_CONTRACT_VERSION, ResolverDecision, ResolverRequest, ResolverResponse,
+    RESOLUTION_CONTRACT_VERSION, ResolutionCandidate, ResolverRequest, ResolverResponse,
 };
 
 /// HTTP client configuration, including the explicit fail-closed timeout.
@@ -130,7 +130,7 @@ mod tests {
     use mongo_pg_ambiguity_policy::{AmbiguityKind, ResolverAmbiguityEvidence, WriteOperation};
 
     use super::{
-        RESOLUTION_CONTRACT_VERSION, ResolverClient, ResolverClientConfig, ResolverDecision,
+        RESOLUTION_CONTRACT_VERSION, ResolutionCandidate, ResolverClient, ResolverClientConfig,
         ResolverRequest,
     };
 
@@ -146,9 +146,9 @@ mod tests {
                 observed_shapes: vec!["scalar".into()],
                 missing_documents: 2,
             },
-            allowed_decisions: BTreeSet::from([
-                ResolverDecision::UseNestedPath,
-                ResolverDecision::Reject,
+            allowed_candidates: BTreeSet::from([
+                ResolutionCandidate::UseNestedPath,
+                ResolutionCandidate::Reject,
             ]),
         }
     }
@@ -156,8 +156,9 @@ mod tests {
     #[test]
     fn serializes_the_shared_non_executable_contract() {
         let json = serde_json::to_string(&request()).expect("request serializes");
-        assert!(json.contains("\"v1\""));
+        assert!(json.contains("\"v2\""));
         assert!(json.contains("\"use_nested_path\""));
+        assert!(json.contains("\"allowed_candidates\""));
         assert!(!json.contains("pipeline"));
         assert!(!json.contains("operator"));
     }

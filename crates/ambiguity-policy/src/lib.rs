@@ -7,13 +7,17 @@ use std::collections::BTreeSet;
 
 use mongo_pg_common::{ErrorKind, ProxyError};
 use mongo_pg_schema_discovery::{FieldPath, ObservedShape, ObservedType, SchemaProfile};
-use mongo_pg_sql_engine::{Predicate, StatementPlan};
+use mongo_pg_sql_engine::{Predicate, SqlValue, StatementPlan};
 use serde::{Deserialize, Serialize};
 
 pub mod audit;
 
 /// Wire contract version shared by Rust and the Python resolver.
-pub const RESOLUTION_CONTRACT_VERSION: &str = "v1";
+///
+/// Version two changes the resolver boundary from an open-ended "decision"
+/// to a Rust-owned candidate identifier. The model can select an identifier,
+/// but it cannot describe a conversion or an executor operation.
+pub const RESOLUTION_CONTRACT_VERSION: &str = "v2";
 
 /// The write operation represented in resolver requests and audit records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,22 +48,34 @@ pub struct WriteAmbiguity {
     pub missing_documents: usize,
 }
 
-/// The only resolver decisions that Rust can represent and validate.
+/// The only resolver candidate identifiers that Rust can represent and validate.
 ///
 /// There is deliberately no variant for an aggregation pipeline, `MongoDB`
 /// operator, arbitrary field name, or arbitrary type conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ResolverDecision {
+pub enum ResolutionCandidate {
+    /// Leave a validated string assignment as a BSON string.
+    KeepString,
+    /// Convert a canonical integer string to BSON `Int64` in Rust.
+    ParseIntegerLosslessly,
+    /// Authorize the existing deterministic nested `$set` construction.
     UseNestedPath,
+    /// Stop execution before the plan reaches the executor.
     Reject,
 }
+
+/// Backward-compatible name for the bounded resolver-candidate type.
+///
+/// New code should use [`ResolutionCandidate`]. This alias avoids implying
+/// that a provider may return an arbitrary policy decision.
+pub type ResolverDecision = ResolutionCandidate;
 
 /// A resolver recommendation after Rust has checked its allowlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedResolution {
     pub field_path: FieldPath,
-    pub decision: ResolverDecision,
+    pub candidate: ResolutionCandidate,
 }
 
 /// Minimized, versioned evidence sent to the resolver for exactly one field.
@@ -70,7 +86,7 @@ pub struct ResolverRequest {
     pub operation: WriteOperation,
     pub target_path: Vec<String>,
     pub ambiguity: ResolverAmbiguityEvidence,
-    pub allowed_decisions: BTreeSet<ResolverDecision>,
+    pub allowed_candidates: BTreeSet<ResolutionCandidate>,
 }
 
 /// Minimized schema evidence for one resolver target path.
@@ -87,8 +103,9 @@ pub struct ResolverAmbiguityEvidence {
 pub struct ResolverResponse {
     pub contract_version: String,
     pub schema_profile_version: u32,
+    pub operation: WriteOperation,
     pub target_path: Vec<String>,
-    pub decision: ResolverDecision,
+    pub candidate: ResolutionCandidate,
     pub confidence: f64,
     pub rationale: String,
 }
@@ -130,24 +147,34 @@ pub fn detect_write_ambiguities(
         .collect()
 }
 
-/// Returns the decisions Rust permits for one ambiguity.
+/// Returns the candidate IDs Rust permits for one typed write and ambiguity.
 ///
-/// Mixed scalar types and conflicting document shapes are not coercible in
-/// the MVP, so `Reject` is their only safe outcome. The deterministic executor
-/// already knows how to construct a nested `$set`, so a missing nested field
-/// may be resolved only as a nested path. Literal dotted-key writes require a
-/// dedicated deterministic executor primitive and remain reject-only.
+/// The first mixed-type primitive is deliberately narrow: an exact scalar
+/// `string`/`integer` field in an `UPDATE` assignment. `KeepString` uses the
+/// existing BSON string executor path; `ParseIntegerLosslessly` retags only a
+/// canonical signed-decimal string as an `Int64` before that path executes.
+/// Shape conflicts, dotted keys, missing sampled fields, filters on the target
+/// field, and every other type combination remain reject-only.
 #[must_use]
-pub fn allowed_decisions(ambiguity: &WriteAmbiguity) -> BTreeSet<ResolverDecision> {
-    let mut decisions = BTreeSet::from([ResolverDecision::Reject]);
+pub fn allowed_candidates(
+    plan: &StatementPlan,
+    ambiguity: &WriteAmbiguity,
+) -> BTreeSet<ResolutionCandidate> {
+    let mut candidates = BTreeSet::from([ResolutionCandidate::Reject]);
     let nested_path_is_safe = ambiguity.kinds
         == BTreeSet::from([AmbiguityKind::MissingFromSampledDocuments])
         && !ambiguity.field_path.is_literal_dotted_key()
         && ambiguity.field_path.segments().len() >= 2;
     if nested_path_is_safe {
-        decisions.insert(ResolverDecision::UseNestedPath);
+        candidates.insert(ResolutionCandidate::UseNestedPath);
     }
-    decisions
+    if let Some(value) = mixed_type_assignment_value(plan, ambiguity) {
+        candidates.insert(ResolutionCandidate::KeepString);
+        if parse_integer_losslessly(value).is_some() {
+            candidates.insert(ResolutionCandidate::ParseIntegerLosslessly);
+        }
+    }
+    candidates
 }
 
 /// Validates one non-executable resolver decision against original evidence.
@@ -157,27 +184,29 @@ pub fn allowed_decisions(ambiguity: &WriteAmbiguity) -> BTreeSet<ResolverDecisio
 /// Returns an `AmbiguousWrite` error if the decision is not in the Rust
 /// allowlist. Callers must treat `Reject` as a request to stop execution.
 pub fn validate_resolution(
+    plan: &StatementPlan,
     ambiguity: &WriteAmbiguity,
-    decision: ResolverDecision,
+    candidate: ResolutionCandidate,
 ) -> Result<ValidatedResolution, ProxyError> {
-    if !allowed_decisions(ambiguity).contains(&decision) {
+    if !allowed_candidates(plan, ambiguity).contains(&candidate) {
         return Err(ProxyError::new(
             ErrorKind::AmbiguousWrite,
             format!(
-                "resolver decision is not allowed for ambiguous field '{}'",
+                "resolver candidate is not allowed for ambiguous field '{}'",
                 ambiguity.field_path.display_name()
             ),
         ));
     }
     Ok(ValidatedResolution {
         field_path: ambiguity.field_path.clone(),
-        decision,
+        candidate,
     })
 }
 
 /// Builds the minimized request for one detected ambiguity.
 #[must_use]
 pub fn resolver_request(
+    plan: &StatementPlan,
     operation: WriteOperation,
     schema_profile_version: u32,
     ambiguity: &WriteAmbiguity,
@@ -201,7 +230,7 @@ pub fn resolver_request(
                 .collect(),
             missing_documents: ambiguity.missing_documents,
         },
-        allowed_decisions: allowed_decisions(ambiguity),
+        allowed_candidates: allowed_candidates(plan, ambiguity),
     }
 }
 
@@ -213,12 +242,14 @@ pub fn resolver_request(
 /// unallowlisted decisions. Such a response must never reach the executor.
 pub fn validate_resolver_response(
     request: &ResolverRequest,
+    plan: &StatementPlan,
     ambiguity: &WriteAmbiguity,
     response: &ResolverResponse,
     minimum_confidence: f64,
 ) -> Result<ValidatedResolution, ProxyError> {
     if response.contract_version != RESOLUTION_CONTRACT_VERSION
         || response.schema_profile_version != request.schema_profile_version
+        || response.operation != request.operation
         || response.target_path != request.target_path
         || !response.confidence.is_finite()
         || response.confidence < minimum_confidence
@@ -231,7 +262,7 @@ pub fn validate_resolver_response(
             "resolver response failed contract, profile, field, confidence, or rationale validation",
         ));
     }
-    validate_resolution(ambiguity, response.decision)
+    validate_resolution(plan, ambiguity, response.candidate)
 }
 
 /// Applies a validated decision without accepting any executor instructions.
@@ -248,15 +279,15 @@ pub fn apply_resolution(
     plan: &StatementPlan,
     resolution: &ValidatedResolution,
 ) -> Result<StatementPlan, ProxyError> {
-    match resolution.decision {
-        ResolverDecision::Reject => Err(ProxyError::new(
+    match resolution.candidate {
+        ResolutionCandidate::Reject => Err(ProxyError::new(
             ErrorKind::AmbiguousWrite,
             format!(
-                "resolver rejected the write ambiguity for field '{}'",
+                "resolver selected rejection for ambiguous field '{}'",
                 resolution.field_path.display_name()
             ),
         )),
-        ResolverDecision::UseNestedPath => {
+        ResolutionCandidate::UseNestedPath => {
             if resolution.field_path.is_literal_dotted_key()
                 || resolution.field_path.segments().len() < 2
                 || !write_plan_references_path(plan, &resolution.field_path)
@@ -267,6 +298,50 @@ pub fn apply_resolution(
                 ));
             }
             Ok(plan.clone())
+        }
+        ResolutionCandidate::KeepString => {
+            mixed_type_assignment_value(
+                plan,
+                &WriteAmbiguity {
+                    field_path: resolution.field_path.clone(),
+                    kinds: BTreeSet::from([AmbiguityKind::MixedBsonTypes]),
+                    observed_types: BTreeSet::from([ObservedType::Integer, ObservedType::String]),
+                    observed_shapes: BTreeSet::from([ObservedShape::Scalar]),
+                    missing_documents: 0,
+                },
+            )
+            .ok_or_else(|| {
+                ProxyError::new(
+                    ErrorKind::AmbiguousWrite,
+                    "string-preserving candidate does not match a safe typed assignment",
+                )
+            })?;
+            Ok(plan.clone())
+        }
+        ResolutionCandidate::ParseIntegerLosslessly => {
+            let value = mixed_type_assignment_value(
+                plan,
+                &WriteAmbiguity {
+                    field_path: resolution.field_path.clone(),
+                    kinds: BTreeSet::from([AmbiguityKind::MixedBsonTypes]),
+                    observed_types: BTreeSet::from([ObservedType::Integer, ObservedType::String]),
+                    observed_shapes: BTreeSet::from([ObservedShape::Scalar]),
+                    missing_documents: 0,
+                },
+            )
+            .ok_or_else(|| {
+                ProxyError::new(
+                    ErrorKind::AmbiguousWrite,
+                    "integer conversion candidate does not match a safe typed assignment",
+                )
+            })?;
+            let integer = parse_integer_losslessly(value).ok_or_else(|| {
+                ProxyError::new(
+                    ErrorKind::AmbiguousWrite,
+                    "integer conversion candidate requires a canonical signed-decimal string",
+                )
+            })?;
+            retype_update_assignment(plan, &resolution.field_path, integer)
         }
     }
 }
@@ -309,6 +384,92 @@ fn write_plan_references_path(plan: &StatementPlan, target: &FieldPath) -> bool 
             .any(|assignment| &assignment.path == target),
         StatementPlan::Delete(_) | StatementPlan::Select(_) => false,
     }
+}
+
+/// Returns the sole string assignment eligible for the first coercion primitive.
+///
+/// This is intentionally more restrictive than general SQL writes. A filter on
+/// the same mixed-type field could change which BSON values match after a
+/// coercion, so it is excluded until its semantics have a dedicated primitive.
+fn mixed_type_assignment_value<'a>(
+    plan: &'a StatementPlan,
+    ambiguity: &WriteAmbiguity,
+) -> Option<&'a str> {
+    if ambiguity.kinds != BTreeSet::from([AmbiguityKind::MixedBsonTypes])
+        || ambiguity.observed_types != BTreeSet::from([ObservedType::Integer, ObservedType::String])
+        || ambiguity.observed_shapes != BTreeSet::from([ObservedShape::Scalar])
+        || ambiguity.missing_documents != 0
+        || ambiguity.field_path.is_literal_dotted_key()
+    {
+        return None;
+    }
+
+    let StatementPlan::Update(update) = plan else {
+        return None;
+    };
+    if predicate_references_path(&update.filter, &ambiguity.field_path) {
+        return None;
+    }
+    let [assignment] = update.assignments.as_slice() else {
+        return None;
+    };
+    if assignment.path != ambiguity.field_path {
+        return None;
+    }
+    let SqlValue::String(value) = &assignment.value else {
+        return None;
+    };
+    Some(value)
+}
+
+fn predicate_references_path(predicate: &Predicate, target: &FieldPath) -> bool {
+    match predicate {
+        Predicate::Compare { path, .. }
+        | Predicate::In { path, .. }
+        | Predicate::IsNull { path, .. } => path == target,
+        Predicate::And(predicates) | Predicate::Or(predicates) => predicates
+            .iter()
+            .any(|predicate| predicate_references_path(predicate, target)),
+    }
+}
+
+/// Parses only an integer string whose canonical representation is unchanged.
+///
+/// Leading zeroes, whitespace, `+` signs, decimal notation, and values outside
+/// the `Int64` range are rejected. This keeps the only supported conversion
+/// deterministic and makes its boundary visible in the candidate allowlist.
+fn parse_integer_losslessly(value: &str) -> Option<i64> {
+    let parsed = value.parse::<i64>().ok()?;
+    (parsed.to_string() == value).then_some(parsed)
+}
+
+fn retype_update_assignment(
+    plan: &StatementPlan,
+    target: &FieldPath,
+    value: i64,
+) -> Result<StatementPlan, ProxyError> {
+    let StatementPlan::Update(update) = plan else {
+        return Err(ProxyError::new(
+            ErrorKind::AmbiguousWrite,
+            "integer conversion candidate requires an UPDATE assignment",
+        ));
+    };
+    let [assignment] = update.assignments.as_slice() else {
+        return Err(ProxyError::new(
+            ErrorKind::AmbiguousWrite,
+            "integer conversion candidate requires exactly one assignment",
+        ));
+    };
+    if assignment.path != *target || !matches!(assignment.value, SqlValue::String(_)) {
+        return Err(ProxyError::new(
+            ErrorKind::AmbiguousWrite,
+            "integer conversion candidate does not match the parsed assignment",
+        ));
+    }
+
+    let mut converted = update.clone();
+    converted.assignments[0].value = SqlValue::Integer(value);
+    Ok(StatementPlan::Update(converted))
 }
 
 fn ambiguity_for_path(
@@ -402,9 +563,10 @@ mod tests {
     use mongo_pg_sql_engine::{AssignmentPlan, Predicate, SqlValue, StatementPlan, UpdatePlan};
 
     use super::{
-        AmbiguityKind, ResolverDecision, ResolverResponse, WriteAmbiguity, WriteOperation,
-        allowed_decisions, apply_resolution, detect_write_ambiguities, resolver_request,
-        validate_resolution, validate_resolver_response,
+        AmbiguityKind, RESOLUTION_CONTRACT_VERSION, ResolutionCandidate, ResolverResponse,
+        WriteAmbiguity, WriteOperation, allowed_candidates, apply_resolution,
+        detect_write_ambiguities, resolver_request, validate_resolution,
+        validate_resolver_response,
     };
 
     fn profile(
@@ -458,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_mixed_types_once_per_field_and_allows_only_rejection() {
+    fn detects_mixed_types_once_per_field_and_rejects_ineligible_assignments() {
         let schema = profile(
             BTreeSet::from([
                 mongo_pg_schema_discovery::ObservedType::Integer,
@@ -476,8 +638,8 @@ mod tests {
                 .contains(&AmbiguityKind::MixedBsonTypes)
         );
         assert_eq!(
-            allowed_decisions(&ambiguities[0]),
-            BTreeSet::from([ResolverDecision::Reject])
+            allowed_candidates(&update_plan(), &ambiguities[0]),
+            BTreeSet::from([ResolutionCandidate::Reject])
         );
     }
 
@@ -504,9 +666,16 @@ mod tests {
                 .kinds
                 .contains(&AmbiguityKind::MissingFromSampledDocuments)
         );
-        assert!(allowed_decisions(&ambiguity).contains(&ResolverDecision::UseNestedPath));
-        validate_resolution(&ambiguity, ResolverDecision::UseNestedPath)
-            .expect("nested path is allowlisted");
+        assert!(
+            allowed_candidates(&nested_update_plan(), &ambiguity)
+                .contains(&ResolutionCandidate::UseNestedPath)
+        );
+        validate_resolution(
+            &nested_update_plan(),
+            &ambiguity,
+            ResolutionCandidate::UseNestedPath,
+        )
+        .expect("nested path is allowlisted");
     }
 
     #[test]
@@ -522,13 +691,13 @@ mod tests {
             .expect("missing field should be ambiguous");
 
         assert_eq!(
-            allowed_decisions(&ambiguity),
-            BTreeSet::from([ResolverDecision::Reject])
+            allowed_candidates(&update_plan(), &ambiguity),
+            BTreeSet::from([ResolutionCandidate::Reject])
         );
     }
 
     #[test]
-    fn validates_and_applies_only_the_echoed_nested_path_decision() {
+    fn validates_and_applies_only_the_echoed_nested_path_candidate() {
         let path = FieldPath::top_level("profile").child("city");
         let ambiguity = WriteAmbiguity {
             field_path: path.clone(),
@@ -537,17 +706,6 @@ mod tests {
             observed_shapes: BTreeSet::from([ObservedShape::Scalar]),
             missing_documents: 1,
         };
-        let request = resolver_request(WriteOperation::Update, 3, &ambiguity);
-        let response = ResolverResponse {
-            contract_version: "v1".to_owned(),
-            schema_profile_version: 3,
-            target_path: vec!["profile".to_owned(), "city".to_owned()],
-            decision: ResolverDecision::UseNestedPath,
-            confidence: 0.9,
-            rationale: "The path is nested and may be created safely.".to_owned(),
-        };
-        let resolution = validate_resolver_response(&request, &ambiguity, &response, 0.8)
-            .expect("matching high-confidence response should validate");
         let plan = StatementPlan::Update(UpdatePlan {
             collection: "customers".to_owned(),
             assignments: vec![AssignmentPlan {
@@ -560,6 +718,18 @@ mod tests {
                 value: SqlValue::Integer(1),
             },
         });
+        let request = resolver_request(&plan, WriteOperation::Update, 3, &ambiguity);
+        let response = ResolverResponse {
+            contract_version: RESOLUTION_CONTRACT_VERSION.to_owned(),
+            schema_profile_version: 3,
+            operation: WriteOperation::Update,
+            target_path: vec!["profile".to_owned(), "city".to_owned()],
+            candidate: ResolutionCandidate::UseNestedPath,
+            confidence: 0.9,
+            rationale: "The path is nested and may be created safely.".to_owned(),
+        };
+        let resolution = validate_resolver_response(&request, &plan, &ambiguity, &response, 0.8)
+            .expect("matching high-confidence response should validate");
         assert_eq!(
             apply_resolution(&plan, &resolution).expect("safe resolution"),
             plan
@@ -575,11 +745,150 @@ mod tests {
             observed_shapes: BTreeSet::from([ObservedShape::Scalar]),
             missing_documents: 1,
         };
-        let resolution = validate_resolution(&ambiguity, ResolverDecision::Reject)
-            .expect("reject is an allowlisted stopping decision");
+        let resolution = validate_resolution(
+            &nested_update_plan(),
+            &ambiguity,
+            ResolutionCandidate::Reject,
+        )
+        .expect("reject is an allowlisted stopping decision");
 
         let error = apply_resolution(&update_plan(), &resolution)
             .expect_err("a rejected decision must not produce an executable plan");
         assert_eq!(error.kind, mongo_pg_common::ErrorKind::AmbiguousWrite);
+    }
+
+    #[test]
+    fn model_can_select_a_rust_owned_lossless_integer_candidate() {
+        let path = FieldPath::top_level("status");
+        let plan = StatementPlan::Update(UpdatePlan {
+            collection: "customers".to_owned(),
+            assignments: vec![AssignmentPlan {
+                path: path.clone(),
+                value: SqlValue::String("1".to_owned()),
+            }],
+            filter: Predicate::Compare {
+                path: FieldPath::top_level("_id"),
+                operator: mongo_pg_sql_engine::ComparisonOperator::Equal,
+                value: SqlValue::String("customer-1".to_owned()),
+            },
+        });
+        let ambiguity = WriteAmbiguity {
+            field_path: path,
+            kinds: BTreeSet::from([AmbiguityKind::MixedBsonTypes]),
+            observed_types: BTreeSet::from([
+                mongo_pg_schema_discovery::ObservedType::Integer,
+                mongo_pg_schema_discovery::ObservedType::String,
+            ]),
+            observed_shapes: BTreeSet::from([ObservedShape::Scalar]),
+            missing_documents: 0,
+        };
+
+        let candidates = allowed_candidates(&plan, &ambiguity);
+        assert_eq!(
+            candidates,
+            BTreeSet::from([
+                ResolutionCandidate::KeepString,
+                ResolutionCandidate::ParseIntegerLosslessly,
+                ResolutionCandidate::Reject,
+            ])
+        );
+        let request = resolver_request(&plan, WriteOperation::Update, 9, &ambiguity);
+        let response = ResolverResponse {
+            contract_version: RESOLUTION_CONTRACT_VERSION.to_owned(),
+            schema_profile_version: 9,
+            operation: WriteOperation::Update,
+            target_path: vec!["status".to_owned()],
+            candidate: ResolutionCandidate::ParseIntegerLosslessly,
+            confidence: 0.95,
+            rationale: "The string is the canonical Int64 representation.".to_owned(),
+        };
+
+        let resolution = validate_resolver_response(&request, &plan, &ambiguity, &response, 0.9)
+            .expect("Rust-generated candidate should validate");
+        let converted = apply_resolution(&plan, &resolution).expect("conversion is deterministic");
+        let StatementPlan::Update(converted) = converted else {
+            panic!("candidate must preserve the UPDATE plan");
+        };
+        assert_eq!(converted.assignments[0].value, SqlValue::Integer(1));
+    }
+
+    #[test]
+    fn rejects_non_canonical_integer_conversion_before_execution() {
+        let path = FieldPath::top_level("status");
+        let plan = StatementPlan::Update(UpdatePlan {
+            collection: "customers".to_owned(),
+            assignments: vec![AssignmentPlan {
+                path: path.clone(),
+                value: SqlValue::String("01".to_owned()),
+            }],
+            filter: Predicate::Compare {
+                path: FieldPath::top_level("_id"),
+                operator: mongo_pg_sql_engine::ComparisonOperator::Equal,
+                value: SqlValue::String("customer-1".to_owned()),
+            },
+        });
+        let ambiguity = WriteAmbiguity {
+            field_path: path,
+            kinds: BTreeSet::from([AmbiguityKind::MixedBsonTypes]),
+            observed_types: BTreeSet::from([
+                mongo_pg_schema_discovery::ObservedType::Integer,
+                mongo_pg_schema_discovery::ObservedType::String,
+            ]),
+            observed_shapes: BTreeSet::from([ObservedShape::Scalar]),
+            missing_documents: 0,
+        };
+        assert_eq!(
+            allowed_candidates(&plan, &ambiguity),
+            BTreeSet::from([ResolutionCandidate::KeepString, ResolutionCandidate::Reject,])
+        );
+        assert!(
+            validate_resolution(
+                &plan,
+                &ambiguity,
+                ResolutionCandidate::ParseIntegerLosslessly,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_a_response_for_a_different_write_operation() {
+        let path = FieldPath::top_level("status");
+        let plan = StatementPlan::Update(UpdatePlan {
+            collection: "customers".to_owned(),
+            assignments: vec![AssignmentPlan {
+                path: path.clone(),
+                value: SqlValue::String("1".to_owned()),
+            }],
+            filter: Predicate::Compare {
+                path: FieldPath::top_level("_id"),
+                operator: mongo_pg_sql_engine::ComparisonOperator::Equal,
+                value: SqlValue::String("customer-1".to_owned()),
+            },
+        });
+        let ambiguity = WriteAmbiguity {
+            field_path: path,
+            kinds: BTreeSet::from([AmbiguityKind::MixedBsonTypes]),
+            observed_types: BTreeSet::from([
+                mongo_pg_schema_discovery::ObservedType::Integer,
+                mongo_pg_schema_discovery::ObservedType::String,
+            ]),
+            observed_shapes: BTreeSet::from([ObservedShape::Scalar]),
+            missing_documents: 0,
+        };
+        let request = resolver_request(&plan, WriteOperation::Update, 9, &ambiguity);
+        let response = ResolverResponse {
+            contract_version: RESOLUTION_CONTRACT_VERSION.to_owned(),
+            schema_profile_version: 9,
+            operation: WriteOperation::Delete,
+            target_path: vec!["status".to_owned()],
+            candidate: ResolutionCandidate::KeepString,
+            confidence: 1.0,
+            rationale: "This operation must not be accepted.".to_owned(),
+        };
+
+        assert!(
+            validate_resolver_response(&request, &plan, &ambiguity, &response, 0.9).is_err()
+        );
     }
 }

@@ -24,7 +24,7 @@ services:
       AMBIGUITY_LLM_PROVIDER: ${AMBIGUITY_LLM_PROVIDER:-google}
       AMBIGUITY_LLM_TIMEOUT_MS: ${AMBIGUITY_LLM_TIMEOUT_MS:-30000}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash}
       GEMINI_API_BASE_URL: ${GEMINI_API_BASE_URL:-https://generativelanguage.googleapis.com}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.2}
@@ -52,6 +52,7 @@ services:
     environment:
       MONGO_URI: mongodb://mongodb:27017
       MONGO_DATABASE: ${MONGO_DATABASE:-demo}
+      MONGO_COLLECTIONS: ${MONGO_COLLECTIONS-}
       MONGO_COLLECTION: ${MONGO_COLLECTION:-customers}
       MONGO_SAMPLE_SIZE: ${MONGO_SAMPLE_SIZE:-100}
     command: ["mongo-pg-schema-discovery"]
@@ -68,6 +69,7 @@ services:
     environment:
       MONGO_URI: mongodb://mongodb:27017
       MONGO_DATABASE: ${MONGO_DATABASE:-demo}
+      MONGO_COLLECTIONS: ${MONGO_COLLECTIONS-}
       MONGO_COLLECTION: ${MONGO_COLLECTION:-customers}
       PROXY_LISTEN_ADDR: 0.0.0.0:5433
       PROXY_AUTH_MODE: ${PROXY_AUTH_MODE:-trust}
@@ -85,6 +87,12 @@ services:
         condition: service_completed_successfully
       ambiguity-resolver:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --host 127.0.0.1 --port 5433 --dbname demo --quiet"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
     command: ["mongo-pg-proxy"]
     restart: unless-stopped
 

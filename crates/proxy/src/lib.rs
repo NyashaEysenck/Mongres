@@ -14,14 +14,18 @@ use std::{
 use async_trait::async_trait;
 use futures_util::{Sink, StreamExt, stream};
 use mongo_pg_ambiguity_policy::audit::AmbiguityAuditRecord;
-use mongo_pg_catalog::{CollectionCatalog, SqlType, project_public_collection};
+use mongo_pg_catalog::{CollectionCatalog, DatabaseCatalog, SqlType, project_public_collections};
 use mongo_pg_common::{ErrorKind, ProxyError};
 use mongo_pg_mongo_executor::{
     WriteOutcome, deterministic_write_client, execute_select, execute_write,
 };
 use mongo_pg_resolver_client::{ResolverClient, ResolverClientConfig};
-use mongo_pg_schema_discovery::{SchemaProfile, load_persisted_profile};
-use mongo_pg_sql_engine::{Projection, SelectPlan, StatementPlan, parse_sql};
+use mongo_pg_schema_discovery::{
+    CollectionProfiles, SchemaProfile, load_required_persisted_profiles, validated_collection_names,
+};
+use mongo_pg_sql_engine::{
+    Projection, SelectPlan, SqlValue, StatementPlan, bind_parameters, parse_sql_for_profiles,
+};
 use mongodb::{
     Database,
     bson::{Bson, Document},
@@ -46,16 +50,18 @@ use tokio::net::TcpListener;
 
 mod ambiguity;
 mod auth;
+mod parameters;
 
 pub use auth::ProxyAuthConfig;
 use auth::ProxyStartupHandler;
 
-/// Runtime settings for a single collection-backed proxy instance.
+/// Runtime settings for an allowlisted collection-backed proxy instance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProxyConfig {
     pub mongo_uri: String,
     pub database_name: String,
-    pub collection_name: String,
+    /// `MongoDB` collections exposed as SQL tables by this proxy process.
+    pub collection_names: Vec<String>,
     pub listen_address: String,
     pub resolver_url: String,
     pub resolver_timeout: Duration,
@@ -73,7 +79,7 @@ impl ProxyConfig {
         Ok(Self {
             mongo_uri: required_environment("MONGO_URI")?,
             database_name: required_environment("MONGO_DATABASE")?,
-            collection_name: required_environment("MONGO_COLLECTION")?,
+            collection_names: configured_collection_names()?,
             listen_address: env::var("PROXY_LISTEN_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:5433".to_owned()),
             resolver_url: env::var("AMBIGUITY_RESOLVER_URL")
@@ -91,7 +97,7 @@ impl ProxyConfig {
     }
 }
 
-/// Starts the `PostgreSQL` wire server after loading its persisted schema.
+/// Starts the `PostgreSQL` wire server after loading its persisted schemas.
 ///
 /// A schema profile is required so the proxy never invents field paths or
 /// result types at query time. Run schema discovery before starting the proxy.
@@ -99,22 +105,14 @@ impl ProxyConfig {
 /// # Errors
 ///
 /// Returns an error when `MongoDB` is unavailable, schema discovery has not
-/// persisted a profile, or the listener cannot be started.
+/// persisted profiles for every configured collection, or the listener cannot
+/// be started.
 pub async fn run_server(config: ProxyConfig) -> Result<(), ProxyError> {
     let client = deterministic_write_client(&config.mongo_uri).await?;
     let database = client.database(&config.database_name);
-    let schema = load_persisted_profile(&database, &config.collection_name)
+    let profiles = load_required_persisted_profiles(&database, &config.collection_names)
         .await
-        .map_err(|error| dependency_error("load persisted schema profile", &error))?
-        .ok_or_else(|| {
-            ProxyError::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "no persisted schema profile for '{}'; run mongo-pg-schema-discovery first",
-                    config.collection_name
-                ),
-            )
-        })?;
+        .map_err(|error| dependency_error("load persisted schema profiles", &error))?;
     let listener = TcpListener::bind(&config.listen_address)
         .await
         .map_err(|error| dependency_error("bind PostgreSQL listener", &error))?;
@@ -123,8 +121,7 @@ pub async fn run_server(config: ProxyConfig) -> Result<(), ProxyError> {
     let backend = Arc::new(ProxyBackend::new(
         database,
         config.database_name,
-        config.collection_name,
-        schema,
+        profiles,
         resolver,
         config.resolver_minimum_confidence,
     ));
@@ -145,6 +142,39 @@ pub async fn run_server(config: ProxyConfig) -> Result<(), ProxyError> {
             }
         });
     }
+}
+
+fn configured_collection_names() -> Result<Vec<String>, ProxyError> {
+    let configured_list = env::var("MONGO_COLLECTIONS").ok();
+    let legacy_collection = match env::var("MONGO_COLLECTION") {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(error) => return Err(ProxyError::new(ErrorKind::InvalidInput, error.to_string())),
+    };
+    parse_configured_collection_names(configured_list.as_deref(), legacy_collection.as_deref())
+}
+
+fn parse_configured_collection_names(
+    configured_list: Option<&str>,
+    legacy_collection: Option<&str>,
+) -> Result<Vec<String>, ProxyError> {
+    let collections = match configured_list.filter(|value| !value.trim().is_empty()) {
+        Some(value) => value
+            .split(',')
+            .map(str::trim)
+            .map(ToOwned::to_owned)
+            .collect(),
+        None => vec![legacy_collection
+            .ok_or_else(|| {
+                ProxyError::new(
+                    ErrorKind::InvalidInput,
+                    "required environment variable is missing: MONGO_COLLECTION or MONGO_COLLECTIONS",
+                )
+            })?
+            .to_owned()],
+    };
+    validated_collection_names(&collections)
+        .map_err(|error| dependency_error("validate configured MongoDB collections", &error))
 }
 
 fn required_environment(name: &str) -> Result<String, ProxyError> {
@@ -199,9 +229,8 @@ fn dependency_error(action: &str, error: &impl std::fmt::Display) -> ProxyError 
 struct ProxyBackend {
     database: Database,
     database_name: String,
-    collection_name: String,
-    schema: SchemaProfile,
-    catalog: CollectionCatalog,
+    profiles: CollectionProfiles,
+    catalog: DatabaseCatalog,
     resolver: ResolverClient,
     resolver_minimum_confidence: f64,
     audit_records: Mutex<Vec<AmbiguityAuditRecord>>,
@@ -211,17 +240,15 @@ impl ProxyBackend {
     fn new(
         database: Database,
         database_name: String,
-        collection_name: String,
-        schema: SchemaProfile,
+        profiles: CollectionProfiles,
         resolver: ResolverClient,
         resolver_minimum_confidence: f64,
     ) -> Self {
-        let catalog = project_public_collection(&collection_name, &schema);
+        let catalog = project_public_collections(&profiles);
         Self {
             database,
             database_name,
-            collection_name,
-            schema,
+            profiles,
             catalog,
             resolver,
             resolver_minimum_confidence,
@@ -234,15 +261,38 @@ impl ProxyBackend {
             return Ok(result);
         }
 
-        let plan = parse_sql(query, &self.collection_name, &self.schema)?;
+        let plan = parse_sql_for_profiles(query, &self.profiles)?;
+        self.execute_plan(plan).await
+    }
+
+    async fn execute_bound(
+        &self,
+        query: &str,
+        parameters: &[SqlValue],
+    ) -> Result<ExecutionResult, ProxyError> {
+        if self.catalog_or_session_query(query).is_some() {
+            return Err(ProxyError::new(
+                ErrorKind::InvalidInput,
+                "prepared statement parameters are not allowed for catalog or session queries",
+            ));
+        }
+
+        let plan = parse_sql_for_profiles(query, &self.profiles)?;
+        let schema = self.schema_for_plan(&plan)?;
+        let plan = bind_parameters(plan, parameters, schema)?;
+        self.execute_plan(plan).await
+    }
+
+    async fn execute_plan(&self, plan: StatementPlan) -> Result<ExecutionResult, ProxyError> {
         match plan {
             StatementPlan::Select(plan) => self.execute_select(plan).await,
             plan @ (StatementPlan::Insert(_)
             | StatementPlan::Update(_)
             | StatementPlan::Delete(_)) => {
+                let schema = self.schema_for_plan(&plan)?;
                 let resolved = ambiguity::resolve_write_plan(
                     plan,
-                    &self.schema,
+                    schema,
                     &self.resolver,
                     self.resolver_minimum_confidence,
                     &self.audit_records,
@@ -252,7 +302,7 @@ impl ProxyBackend {
                     Ok(outcome) => outcome,
                     Err(error) => {
                         ambiguity::record_mongo_execution_failure(
-                            &self.schema,
+                            schema,
                             resolved.audit_context.as_ref(),
                             &self.audit_records,
                         );
@@ -260,7 +310,7 @@ impl ProxyBackend {
                     }
                 };
                 ambiguity::record_execution(
-                    &self.schema,
+                    schema,
                     resolved.audit_context.as_ref(),
                     outcome,
                     &self.audit_records,
@@ -277,8 +327,11 @@ impl ProxyBackend {
         if let Some(result) = self.catalog_or_session_query(query) {
             return Ok(result.fields());
         }
-        match parse_sql(query, &self.collection_name, &self.schema)? {
-            StatementPlan::Select(plan) => Ok(self.select_fields(&plan)),
+        match parse_sql_for_profiles(query, &self.profiles)? {
+            StatementPlan::Select(plan) => {
+                let catalog = self.catalog_for_collection(&plan.collection)?;
+                Ok(Self::select_fields(&plan, catalog))
+            }
             StatementPlan::Insert(_) | StatementPlan::Update(_) | StatementPlan::Delete(_) => {
                 Ok(Vec::new())
             }
@@ -286,8 +339,9 @@ impl ProxyBackend {
     }
 
     async fn execute_select(&self, plan: SelectPlan) -> Result<ExecutionResult, ProxyError> {
-        let fields = self.select_fields(&plan);
-        let selected_paths = self.selected_paths(&plan);
+        let catalog = self.catalog_for_collection(&plan.collection)?;
+        let fields = Self::select_fields(&plan, catalog);
+        let selected_paths = Self::selected_paths(&plan, catalog);
         let outcome = execute_select(&self.database, &plan).await?;
         let rows = outcome
             .documents
@@ -303,10 +357,9 @@ impl ProxyBackend {
         Ok(ExecutionResult::Query { fields, rows })
     }
 
-    fn selected_paths(&self, plan: &SelectPlan) -> Vec<Vec<String>> {
+    fn selected_paths(plan: &SelectPlan, catalog: &CollectionCatalog) -> Vec<Vec<String>> {
         match &plan.projection {
-            Projection::All => self
-                .catalog
+            Projection::All => catalog
                 .columns
                 .iter()
                 .filter(|column| column.source_paths.len() == 1)
@@ -319,10 +372,9 @@ impl ProxyBackend {
         }
     }
 
-    fn select_fields(&self, plan: &SelectPlan) -> Vec<WireField> {
+    fn select_fields(plan: &SelectPlan, catalog: &CollectionCatalog) -> Vec<WireField> {
         match &plan.projection {
-            Projection::All => self
-                .catalog
+            Projection::All => catalog
                 .columns
                 .iter()
                 .filter(|column| column.source_paths.len() == 1)
@@ -331,8 +383,7 @@ impl ProxyBackend {
             Projection::Fields(fields) => fields
                 .iter()
                 .map(|field| {
-                    let sql_type = self
-                        .catalog
+                    let sql_type = catalog
                         .columns
                         .iter()
                         .find(|column| column.column_name == field.path.display_name())
@@ -347,6 +398,25 @@ impl ProxyBackend {
                 })
                 .collect(),
         }
+    }
+
+    fn schema_for_plan(&self, plan: &StatementPlan) -> Result<&SchemaProfile, ProxyError> {
+        let collection = collection_from_plan(plan);
+        self.profiles.get(collection).ok_or_else(|| {
+            ProxyError::new(
+                ErrorKind::InvalidInput,
+                format!("collection '{collection}' is not in the configured collection allowlist"),
+            )
+        })
+    }
+
+    fn catalog_for_collection(&self, collection: &str) -> Result<&CollectionCatalog, ProxyError> {
+        self.catalog.table(collection).ok_or_else(|| {
+            ProxyError::new(
+                ErrorKind::Dependency,
+                format!("catalog projection is missing configured collection '{collection}'"),
+            )
+        })
     }
 
     fn catalog_or_session_query(&self, query: &str) -> Option<ExecutionResult> {
@@ -405,11 +475,16 @@ impl ProxyBackend {
                 WireField::new("table_name", SqlType::Text),
                 WireField::new("table_type", SqlType::Text),
             ],
-            vec![vec![
-                WireValue::Text(self.catalog.table.schema_name.clone()),
-                WireValue::Text(self.catalog.table.table_name.clone()),
-                WireValue::Text("BASE TABLE".to_owned()),
-            ]],
+            self.catalog
+                .tables()
+                .map(|table| {
+                    vec![
+                        WireValue::Text(table.table.schema_name.clone()),
+                        WireValue::Text(table.table.table_name.clone()),
+                        WireValue::Text("BASE TABLE".to_owned()),
+                    ]
+                })
+                .collect(),
         )
     }
 
@@ -425,8 +500,7 @@ impl ProxyBackend {
         ];
         let rows = self
             .catalog
-            .columns
-            .iter()
+            .columns()
             .map(|column| {
                 vec![
                     WireValue::Text(column.table.schema_name.clone()),
@@ -454,16 +528,21 @@ impl ProxyBackend {
                 WireField::new("hastriggers", SqlType::Boolean),
                 WireField::new("rowsecurity", SqlType::Boolean),
             ],
-            vec![vec![
-                WireValue::Text(self.catalog.table.schema_name.clone()),
-                WireValue::Text(self.catalog.table.table_name.clone()),
-                WireValue::Text("mongo-pg-proxy".to_owned()),
-                WireValue::Null,
-                WireValue::Boolean(false),
-                WireValue::Boolean(false),
-                WireValue::Boolean(false),
-                WireValue::Boolean(false),
-            ]],
+            self.catalog
+                .tables()
+                .map(|table| {
+                    vec![
+                        WireValue::Text(table.table.schema_name.clone()),
+                        WireValue::Text(table.table.table_name.clone()),
+                        WireValue::Text("mongo-pg-proxy".to_owned()),
+                        WireValue::Null,
+                        WireValue::Boolean(false),
+                        WireValue::Boolean(false),
+                        WireValue::Boolean(false),
+                        WireValue::Boolean(false),
+                    ]
+                })
+                .collect(),
         )
     }
 
@@ -475,12 +554,17 @@ impl ProxyBackend {
                 WireField::new("Type", SqlType::Text),
                 WireField::new("Owner", SqlType::Text),
             ],
-            vec![vec![
-                WireValue::Text(self.catalog.table.schema_name.clone()),
-                WireValue::Text(self.catalog.table.table_name.clone()),
-                WireValue::Text("table".to_owned()),
-                WireValue::Text("mongo-pg-proxy".to_owned()),
-            ]],
+            self.catalog
+                .tables()
+                .map(|table| {
+                    vec![
+                        WireValue::Text(table.table.schema_name.clone()),
+                        WireValue::Text(table.table.table_name.clone()),
+                        WireValue::Text("table".to_owned()),
+                        WireValue::Text("mongo-pg-proxy".to_owned()),
+                    ]
+                })
+                .collect(),
         )
     }
 }
@@ -565,6 +649,15 @@ fn command_result(plan: &StatementPlan, outcome: WriteOutcome) -> CommandResult 
             rows: usize::try_from(outcome.deleted).unwrap_or(usize::MAX),
         },
         StatementPlan::Select(_) => unreachable!("SELECT is not a command result"),
+    }
+}
+
+fn collection_from_plan(plan: &StatementPlan) -> &str {
+    match plan {
+        StatementPlan::Select(plan) => &plan.collection,
+        StatementPlan::Insert(plan) => &plan.collection,
+        StatementPlan::Update(plan) => &plan.collection,
+        StatementPlan::Delete(plan) => &plan.collection,
     }
 }
 
@@ -731,13 +824,8 @@ impl ExtendedQueryHandler for ProxyBackend {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        if portal.parameter_len() != 0 {
-            return Err(proxy_error_to_pgwire(ProxyError::new(
-                ErrorKind::FeatureNotSupported,
-                "prepared statement parameters are not implemented yet",
-            )));
-        }
-        self.execute(&portal.statement.statement)
+        let parameters = portal_parameters(portal).map_err(proxy_error_to_pgwire)?;
+        self.execute_bound(&portal.statement.statement, &parameters)
             .await
             .map_err(proxy_error_to_pgwire)
             .and_then(|result| response_from_result(result, &portal.result_column_format))
@@ -788,6 +876,30 @@ impl ExtendedQueryHandler for ProxyBackend {
     }
 }
 
+fn portal_parameters(portal: &Portal<String>) -> Result<Vec<SqlValue>, ProxyError> {
+    if portal.parameter_len() != portal.statement.parameter_types.len() {
+        return Err(ProxyError::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "prepared statement supplies {} values but declares {} parameter types; explicit supported PostgreSQL OIDs are required",
+                portal.parameter_len(),
+                portal.statement.parameter_types.len()
+            ),
+        ));
+    }
+
+    portal
+        .parameters
+        .iter()
+        .zip(&portal.statement.parameter_types)
+        .enumerate()
+        .map(|(index, (value, parameter_type))| {
+            let format = parameters::parameter_format(&portal.parameter_format, index)?;
+            parameters::decode_parameter(value.as_deref(), parameter_type, format)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, time::Duration};
@@ -797,7 +909,10 @@ mod tests {
     use mongo_pg_resolver_client::{ResolverClient, ResolverClientConfig};
     use mongo_pg_schema_discovery::{SampleDocument, SampleValue, SchemaProfile};
 
-    use super::{ProxyBackend, WireValue, bson_to_wire_value};
+    use super::{
+        ExecutionResult, ProxyBackend, WireValue, bson_to_wire_value,
+        parse_configured_collection_names,
+    };
 
     fn document(fields: impl IntoIterator<Item = (&'static str, SampleValue)>) -> SampleDocument {
         fields
@@ -826,8 +941,7 @@ mod tests {
                 .expect("valid URI")
                 .database("demo"),
             "demo".to_owned(),
-            "customers".to_owned(),
-            profile,
+            BTreeMap::from([("customers".to_owned(), profile)]),
             resolver_client(),
             0.8,
         );
@@ -849,6 +963,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn collection_list_overrides_the_legacy_single_collection_setting() {
+        let collections =
+            parse_configured_collection_names(Some("orders, customers"), Some("legacy_customers"))
+                .expect("collection list should be valid");
+        assert_eq!(collections, vec!["customers", "orders"]);
+
+        let fallback = parse_configured_collection_names(Some(""), Some("customers"))
+            .expect("empty Compose list should use the legacy fallback");
+        assert_eq!(fallback, vec!["customers"]);
+    }
+
     #[tokio::test]
     async fn blocks_ambiguous_writes_before_calling_mongodb() {
         let profile = SchemaProfile::infer(&[
@@ -867,8 +993,7 @@ mod tests {
                 .expect("valid URI")
                 .database("demo"),
             "demo".to_owned(),
-            "customers".to_owned(),
-            profile,
+            BTreeMap::from([("customers".to_owned(), profile)]),
             resolver_client(),
             0.8,
         );
@@ -887,5 +1012,61 @@ mod tests {
             records[0].outcome,
             AuditOutcome::Blocked(AuditFailure::NoSafeResolution)
         );
+    }
+
+    #[tokio::test]
+    async fn exposes_and_routes_each_allowlisted_collection_in_isolation() {
+        let customers = SchemaProfile::infer(&[document([(
+            "name",
+            SampleValue::String("Amina".to_owned()),
+        )])]);
+        let orders = SchemaProfile::infer(&[document([("order_total", SampleValue::Integer(42))])]);
+        let backend = ProxyBackend::new(
+            mongodb::Client::with_uri_str("mongodb://localhost:27017")
+                .await
+                .expect("valid URI")
+                .database("demo"),
+            "demo".to_owned(),
+            BTreeMap::from([
+                ("customers".to_owned(), customers),
+                ("orders".to_owned(), orders),
+            ]),
+            resolver_client(),
+            0.8,
+        );
+
+        let tables = backend
+            .catalog_or_session_query("SELECT * FROM information_schema.tables")
+            .expect("catalog query should be handled");
+        let ExecutionResult::Query { rows, .. } = tables else {
+            panic!("catalog query must return rows");
+        };
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .any(|row| { row.get(1) == Some(&WireValue::Text("customers".to_owned())) })
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.get(1) == Some(&WireValue::Text("orders".to_owned())))
+        );
+
+        let fields = backend
+            .describe("SELECT order_total FROM orders")
+            .expect("orders profile should resolve its own field");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "order_total");
+        assert_eq!(fields[0].sql_type, mongo_pg_catalog::SqlType::BigInt);
+
+        let leaked_schema = backend
+            .describe("SELECT name FROM orders")
+            .expect_err("customers fields must not resolve against orders");
+        assert_eq!(leaked_schema.kind, ErrorKind::InvalidInput);
+
+        let leaked_write = backend
+            .execute("UPDATE orders SET name = 'wrong table' WHERE order_total = 42")
+            .await
+            .expect_err("write assignments must use the selected collection profile");
+        assert_eq!(leaked_write.kind, ErrorKind::InvalidInput);
     }
 }
