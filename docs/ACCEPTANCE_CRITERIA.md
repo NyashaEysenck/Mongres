@@ -18,13 +18,13 @@ to satisfy the original scope or to make its operational claims credible.
 ## B. PostgreSQL protocol compatibility
 
 - [x] `psql` can connect using a PostgreSQL connection string in local trust/no-op mode.
-- [ ] Credential authentication failures are returned as PostgreSQL errors; cleartext configuration is implemented and needs wire-level acceptance/rejection coverage.
+- [x] Credential authentication failures are returned as PostgreSQL errors; wire-level coverage verifies valid credentials and SQLSTATE `28P01` rejection.
 - [x] `SELECT 1`-style session probes and common client startup queries do not break the session.
 - [x] The active MongoDB collection appears as a table in the emulated catalog.
 - [x] `information_schema.columns` exposes discovered fields and SQL types.
 - [x] `psql` meta-commands such as `\\dt` and `\\d <table>` work for the demo collection.
-- [ ] Typed bound parameters execute through the PostgreSQL extended-query protocol without lossy conversion.
-- [ ] A standard PostgreSQL driver receives valid row descriptions, values, command completion, and errors in a recorded integration test.
+- [x] Typed bound parameters execute through the PostgreSQL extended-query protocol without lossy conversion.
+- [x] A standard PostgreSQL driver receives valid row descriptions, values, and command completion in a recorded integration test.
 - [x] The supported wire-protocol flow works without a REST adapter or custom MongoDB client library.
 - [ ] DBeaver or an equivalent standard PostgreSQL GUI can connect and inspect the emulated catalog.
 
@@ -78,7 +78,7 @@ to satisfy the original scope or to make its operational claims credible.
 
 - [x] Unit tests cover inference, SQL planning, type mapping, ambiguity detection, and decision validation.
 - [x] Integration tests exist for a real MongoDB instance and are run when its explicit test environment is available.
-- [ ] End-to-end tests exercise the proxy through the PostgreSQL wire protocol.
+- [x] End-to-end tests exercise the proxy through the PostgreSQL wire protocol.
 - [ ] Logs redact credentials and configurable sensitive values.
 - [x] The project has deterministic error behavior for unsupported or unsafe operations.
 - [ ] The final review records evidence for all three core claims: protocol compatibility, reliable writes, and easy installation.

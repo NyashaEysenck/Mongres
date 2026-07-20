@@ -43,10 +43,11 @@ async fn live_mongodb_and_resolver_write_flow() {
         .expect("test collection should be reset");
     collection
         .insert_many(vec![
-            doc! { "name": "Amina", "status": "new" },
+            doc! { "name": "Amina", "status": "new", "tier": "basic" },
             doc! {
                 "name": "Tendai",
-                "status": "new",
+                "status": 1_i64,
+                "tier": "basic",
                 "profile": { "city": "Bulawayo" },
             },
         ])
@@ -58,7 +59,7 @@ async fn live_mongodb_and_resolver_write_flow() {
 
     let clear_outcome = resolve_and_execute(
         &database,
-        update(FieldPath::top_level("status"), "active"),
+        update(FieldPath::top_level("tier"), "premium"),
         &schema,
         resolver("http://127.0.0.1:1/v1/resolve"),
         0.8,
@@ -74,33 +75,28 @@ async fn live_mongodb_and_resolver_write_flow() {
             .expect("audit records should be readable")
             .is_empty()
     );
-    assert_eq!(
-        stored_string(&collection, "Amina", "status").await,
-        "active"
-    );
+    assert_eq!(stored_string(&collection, "Amina", "tier").await, "premium");
 
-    let nested_path = FieldPath::top_level("profile").child("city");
-    let nested_outcome = resolve_and_execute(
+    let mixed_outcome = resolve_and_execute(
         &database,
-        update(nested_path.clone(), "Harare"),
+        update(FieldPath::top_level("status"), "1"),
         &schema,
-        resolver(resolver_url),
+        resolver(&resolver_url),
         0.8,
         &audit_records,
     )
     .await
-    .expect("resolver-approved nested write should execute");
-    assert_eq!(nested_outcome.matched, 1);
-    assert_eq!(nested_outcome.modified, 1);
+    .expect("resolver-approved mixed-type write should execute");
+    assert_eq!(mixed_outcome.matched, 1);
+    assert_eq!(mixed_outcome.modified, 1);
     assert_eq!(
         stored_document(&collection, "Amina")
             .await
-            .get_document("profile")
-            .expect("profile should be created as a nested document")
-            .get_str("city"),
-        Ok("Harare")
+            .get_i64("status"),
+        Ok(1)
     );
 
+    let nested_path = FieldPath::top_level("profile").child("city");
     let failed = resolve_and_execute(
         &database,
         update(nested_path, "Mutare"),
@@ -111,13 +107,10 @@ async fn live_mongodb_and_resolver_write_flow() {
     )
     .await;
     assert!(failed.is_err());
-    assert_eq!(
-        stored_document(&collection, "Amina")
+    assert!(
+        !stored_document(&collection, "Amina")
             .await
-            .get_document("profile")
-            .expect("profile should remain after failed resolution")
-            .get_str("city"),
-        Ok("Harare")
+            .contains_key("profile")
     );
     assert_eq!(
         audit_records
@@ -154,9 +147,21 @@ fn schema() -> SchemaProfile {
         sampled_documents: 2,
         fields: vec![
             field(FieldPath::top_level("name"), 2, 0),
-            field(FieldPath::top_level("status"), 2, 0),
+            mixed_status_field(),
+            field(FieldPath::top_level("tier"), 2, 0),
             field(FieldPath::top_level("profile").child("city"), 1, 1),
         ],
+    }
+}
+
+fn mixed_status_field() -> FieldProfile {
+    FieldProfile {
+        path: FieldPath::top_level("status"),
+        present_documents: 2,
+        missing_documents: 0,
+        observed_types: BTreeSet::from([ObservedType::Integer, ObservedType::String]),
+        observed_shapes: BTreeSet::from([ObservedShape::Scalar]),
+        has_dotted_key_collision: false,
     }
 }
 

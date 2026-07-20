@@ -7,7 +7,7 @@ readonly postgres_url='postgresql://proxy:5433/demo?sslmode=disable'
 readonly demo_customer_id="customer-demo-$(date +%s)"
 
 compose() {
-  MONGO_DATABASE=demo MONGO_COLLECTION=customers docker compose "$@"
+  MONGO_DATABASE=demo MONGO_COLLECTIONS=customers,mixed_statuses docker compose "$@"
 }
 
 fail() {
@@ -32,6 +32,12 @@ verify_customer() {
     "printjson(db.customers.findOne({_id: '$1'}))"
 }
 
+verify_mixed_status() {
+  printf '\nMongoDB mixed-type verification for status-001:\n'
+  compose exec -T mongodb mongosh --quiet demo --eval \
+    "printjson(db.mixed_statuses.aggregate([{$match: {_id: 'status-001'}}, {$project: {_id: 0, value: '$status', bsonType: {$type: '$status'}}}]).toArray())"
+}
+
 wait_for_proxy() {
   local attempt
   for attempt in $(seq 1 30); do
@@ -49,10 +55,13 @@ require_llm_key
 printf '%s\n' 'Starting the MongoDB, resolver, discovery, and proxy stack...'
 compose up --build -d
 
-# Reset only the seeded ambiguity fixture, then rediscover it. This makes a
-# repeat run deterministic while leaving the rest of the demo collection intact.
+# Reset the two deterministic demo fixtures, then rediscover them. This makes
+# repeat runs deterministic while leaving the rest of the collection intact.
 compose exec -T mongodb mongosh --quiet demo --eval \
   "db.customers.updateOne({_id: 'customer-002'}, {\$unset: {'profile.address.city': ''}})" \
+  >/dev/null
+compose exec -T mongodb mongosh --quiet demo --eval \
+  "db.mixed_statuses.updateOne({_id: 'status-001'}, {\$set: {status: 'active'}})" \
   >/dev/null
 compose run --rm schema-discovery
 compose restart proxy >/dev/null
@@ -67,9 +76,11 @@ run_sql "INSERT INTO customers (_id, name, active) VALUES ('$demo_customer_id', 
 run_sql "UPDATE customers SET \"profile.address.country\" = 'Zimbabwe' WHERE _id = '$demo_customer_id'"
 verify_customer "$demo_customer_id"
 
-# `profile.address.city` exists in the sample but is missing from customer-002.
-# This is the one MVP ambiguity that Rust allowlists for a constrained LLM decision.
-run_sql "UPDATE customers SET \"profile.address.city\" = 'Mutare' WHERE _id = 'customer-002'"
-verify_customer 'customer-002'
+# `status` is observed as both string and integer, but has no structural
+# conflict. The resolver selects one Rust-owned candidate for `'1'`; Rust then
+# either preserves that string or losslessly converts it to an integer before
+# issuing the fixed deterministic `$set` operation.
+run_sql "UPDATE mixed_statuses SET status = '1' WHERE _id = 'status-001'"
+verify_mixed_status
 
 printf '%s\n' '' 'Demo complete: every write was issued through PostgreSQL and read back from MongoDB.'

@@ -185,7 +185,99 @@ fn required_setting(name: &str, value: Option<String>) -> Result<String, ProxyEr
 
 #[cfg(test)]
 mod tests {
-    use super::ProxyAuthConfig;
+    use std::{fmt::Debug, sync::Arc};
+
+    use async_trait::async_trait;
+    use futures_util::Sink;
+    use pgwire::{
+        api::{
+            ClientInfo, PgWireHandlerFactory,
+            copy::NoopCopyHandler,
+            query::{PlaceholderExtendedQueryHandler, SimpleQueryHandler},
+            results::{Response, Tag},
+        },
+        error::{PgWireError, PgWireResult},
+        messages::PgWireBackendMessage,
+        tokio::process_socket,
+    };
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_postgres::{NoTls, error::SqlState};
+
+    use super::{ProxyAuthConfig, ProxyStartupHandler};
+
+    struct AuthTestQueryHandler;
+
+    #[async_trait]
+    impl SimpleQueryHandler for AuthTestQueryHandler {
+        async fn do_query<'a, C>(
+            &self,
+            _client: &mut C,
+            _query: &'a str,
+        ) -> PgWireResult<Vec<Response<'a>>>
+        where
+            C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+            C::Error: Debug,
+            PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+        {
+            Ok(vec![Response::Execution(Tag::new("OK").with_rows(1))])
+        }
+    }
+
+    struct AuthTestFactory {
+        auth: ProxyAuthConfig,
+        query_handler: Arc<AuthTestQueryHandler>,
+    }
+
+    impl PgWireHandlerFactory for AuthTestFactory {
+        type StartupHandler = ProxyStartupHandler;
+        type SimpleQueryHandler = AuthTestQueryHandler;
+        type ExtendedQueryHandler = PlaceholderExtendedQueryHandler;
+        type CopyHandler = NoopCopyHandler;
+
+        fn simple_query_handler(&self) -> Arc<Self::SimpleQueryHandler> {
+            self.query_handler.clone()
+        }
+
+        fn extended_query_handler(&self) -> Arc<Self::ExtendedQueryHandler> {
+            Arc::new(PlaceholderExtendedQueryHandler)
+        }
+
+        fn startup_handler(&self) -> Arc<Self::StartupHandler> {
+            Arc::new(ProxyStartupHandler::new(self.auth.clone()))
+        }
+
+        fn copy_handler(&self) -> Arc<Self::CopyHandler> {
+            Arc::new(NoopCopyHandler)
+        }
+    }
+
+    async fn start_auth_server(auth: ProxyAuthConfig) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test PostgreSQL listener");
+        let address = listener.local_addr().expect("read test listener address");
+        let factory = Arc::new(AuthTestFactory {
+            auth,
+            query_handler: Arc::new(AuthTestQueryHandler),
+        });
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept test client");
+            serve_one_connection(socket, factory).await;
+        });
+        address
+    }
+
+    async fn serve_one_connection(socket: TcpStream, factory: Arc<AuthTestFactory>) {
+        let _ = process_socket(socket, None, factory).await;
+    }
+
+    fn connection_string(address: std::net::SocketAddr, password: &str) -> String {
+        format!(
+            "host={} port={} user=proxy_test password={password} dbname=proxy_test sslmode=disable",
+            address.ip(),
+            address.port()
+        )
+    }
 
     #[test]
     fn defaults_to_trust_mode() {
@@ -216,5 +308,45 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("secret-value"));
+    }
+
+    #[tokio::test]
+    async fn cleartext_auth_accepts_valid_postgres_driver_credentials() {
+        let address = start_auth_server(ProxyAuthConfig::CleartextPassword {
+            username: "proxy_test".to_owned(),
+            password: "correct-password".to_owned(),
+        })
+        .await;
+        let (client, connection) =
+            tokio_postgres::connect(&connection_string(address, "correct-password"), NoTls)
+                .await
+                .expect("valid PostgreSQL driver credentials must connect");
+        let connection_task = tokio::spawn(connection);
+
+        client
+            .simple_query("SELECT 1")
+            .await
+            .expect("authenticated PostgreSQL driver can query");
+        drop(client);
+        connection_task
+            .await
+            .expect("join PostgreSQL client connection task")
+            .expect("PostgreSQL client connection completes cleanly");
+    }
+
+    #[tokio::test]
+    async fn cleartext_auth_rejects_invalid_postgres_driver_credentials() {
+        let address = start_auth_server(ProxyAuthConfig::CleartextPassword {
+            username: "proxy_test".to_owned(),
+            password: "correct-password".to_owned(),
+        })
+        .await;
+
+        let Err(error) =
+            tokio_postgres::connect(&connection_string(address, "wrong-password"), NoTls).await
+        else {
+            panic!("invalid PostgreSQL driver credentials must be rejected");
+        };
+        assert_eq!(error.code(), Some(&SqlState::INVALID_PASSWORD));
     }
 }

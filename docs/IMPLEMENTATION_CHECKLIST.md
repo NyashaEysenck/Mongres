@@ -12,9 +12,9 @@ The detailed, authoritative task list is in
 [REQUIREMENTS_ALIGNMENT_PLAN.md](REQUIREMENTS_ALIGNMENT_PLAN.md). Track these
 milestones here as the plan is completed.
 
-- [ ] Complete Phase A: configurable authentication and typed parameter binding are implemented; wire auth, standard-driver, `psql` evidence, and DBeaver validation remain.
+- [ ] Complete Phase A: configurable authentication, wire-level auth coverage, typed parameter binding, and standard-driver bound-parameter coverage are implemented; `psql` evidence and DBeaver validation remain.
 - [ ] Complete Phase B: multi-collection discovery, catalog projection, routing, and unit isolation coverage are implemented; real-Mongo two-collection evidence remains.
-- [ ] Complete Phase C: candidate decisions, lossless deterministic coercion, and Rust validation are implemented; real LLM integration and BSON-type demo verification remain.
+- [ ] Complete Phase C: candidate decisions, lossless deterministic coercion, Rust validation, and the mixed-type demo script are implemented; real LLM integration and BSON-type demo verification remain.
 - [ ] Complete Phase D: deterministic structural ambiguity primitives before allowing any structural LLM decision.
 - [ ] Complete Phase E: real-MongoDB and wire-level regression matrix, profile lifecycle policy, and structured partial-failure diagnostics.
 - [ ] Complete Phase F: clean-environment Compose proof, health/readiness, redacted observability, inspectable audit sink, and final evidence note.
@@ -74,7 +74,8 @@ milestones here as the plan is completed.
 - [x] Implement simple-query dispatch from the wire protocol to SQL plans/executor.
 - [x] Return PostgreSQL row descriptions, command completion, and SQLSTATE errors.
 - [x] Verify `psql` table listing, column inspection, reads, nested writes, and affected-row tags against local MongoDB.
-- [ ] Verify one standard PostgreSQL driver and DBeaver catalog inspection.
+- [x] Verify one standard PostgreSQL driver with bound `SELECT` and `UPDATE` parameters through the proxy.
+- [ ] Verify DBeaver catalog inspection.
 
 ## Phase 6 — Write-time ambiguity resolution
 
@@ -104,6 +105,6 @@ fail-closed until Rust has a dedicated safe execution primitive for them.
 - [x] Verify every demo write by reading MongoDB afterwards.
 - [ ] Add structured logging, health/readiness endpoints, and configurable timeouts.
 - [ ] Redact credentials and sensitive values from logs/audit records.
-- [ ] Add regression fixtures for null/missing fields, arrays, mixed types, dotted keys, and partial failures.
+- [x] Add regression fixtures for null/missing fields, arrays, mixed types, dotted keys, and partial failures (real-Mongo execution remains environment-gated).
 - [ ] Add baseline discovery and query/write latency benchmarks.
 - [ ] Complete clean-machine installation test and final documentation review.

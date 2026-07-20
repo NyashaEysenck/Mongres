@@ -132,9 +132,10 @@ provider key, without native extensions or local Rust/Python installation.
 ### Standard tools
 
 - [x] Add configurable cleartext credential authentication and document local trust mode.
-- [ ] Add a wire-level authentication test proving valid credentials connect and invalid credentials return SQLSTATE `28P01`.
+- [x] Add a wire-level authentication test proving valid credentials connect and invalid credentials return SQLSTATE `28P01`.
 - [x] Implement typed extended-query parameter binding with strict supported OID decoding and schema revalidation.
-- [ ] Add a standard PostgreSQL-driver integration test with bound parameters.
+- [x] Add a standard PostgreSQL-driver integration test with bound parameters.
+  Evidence: `MONGO_INTEGRATION_URI=mongodb://localhost:27017 MONGO_INTEGRATION_DATABASE=mongo_pg_proxy_test cargo test -p mongo-pg-proxy --test driver_integration -- --ignored` passed locally.
 - [ ] Validate DBeaver catalog inspection, read, and write against Compose.
 - [ ] Record `psql`, driver, and DBeaver compatibility evidence.
 
@@ -150,12 +151,13 @@ provider key, without native extensions or local Rust/Python installation.
 - [x] Add lossless string-to-integer and string-preserving coercion primitives.
 - [x] Validate candidate IDs, profile version, target, operation, and confidence in Rust.
 - [ ] Add a real MongoDB/LLM integration test for an accepted mixed-type write.
-- [ ] Change the scripted demo to show the mixed-type decision and BSON-type read-back.
+  Status: the live proxy test now targets a genuine mixed `status` string/integer write and verifies the stored BSON integer, but the current Google provider run is blocked by HTTP `429`.
+- [x] Change the scripted demo to show the mixed-type decision and BSON-type read-back (script and shell validation complete; clean-environment execution remains required).
 - [x] Keep mixed shapes and dotted-key execution reject-only until dedicated primitives exist.
 
 ### Reliability and installation proof
 
-- [ ] Add the remaining real-MongoDB and wire-level regression matrix.
+- [ ] Add the remaining real-MongoDB and wire-level regression matrix (Mongo executor fixtures are added but require a recorded live run; wire-level cases remain).
 - [ ] Define profile refresh, staleness, and migration behavior.
 - [ ] Add structured partial-failure diagnostics.
 - [ ] Add proxy readiness, structured redacted logs, and an inspectable audit sink.

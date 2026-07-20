@@ -129,7 +129,8 @@ class GoogleGeminiAdvisor:
             "generationConfig": {
                 "temperature": 0,
                 "responseMimeType": "application/json",
-                "responseSchema": _gemini_response_schema(),
+                "maxOutputTokens": 1024,
+                "thinkingConfig": {"thinkingLevel": "low"},
             },
         }
         response = _post_json(
@@ -138,7 +139,7 @@ class GoogleGeminiAdvisor:
             {"x-goog-api-key": api_key},
             self._settings.timeout_seconds,
         )
-        return AmbiguityResponse.model_validate_json(_gemini_output_text(response))
+        return _validated_response_text(_gemini_output_text(response))
 
 
 class OpenAIResponsesAdvisor:
@@ -171,7 +172,7 @@ class OpenAIResponsesAdvisor:
             {"authorization": f"Bearer {api_key}"},
             self._settings.timeout_seconds,
         )
-        return AmbiguityResponse.model_validate_json(_openai_output_text(response))
+        return _validated_response_text(_openai_output_text(response))
 
 
 _SYSTEM_INSTRUCTION = """You are a constrained write-ambiguity advisor.
@@ -183,8 +184,16 @@ are defined by Rust; never invent an ID. Reject when unsure."""
 
 
 def _prompt(request: AmbiguityRequest) -> str:
-    return "Evaluate this non-executable ambiguity request:\n" + json.dumps(
+    request_json = json.dumps(
         request.model_dump(mode="json"), separators=(",", ":"), sort_keys=True
+    )
+    return (
+        "Evaluate this non-executable ambiguity request and return exactly one JSON object "
+        "with exactly these keys: contract_version, schema_profile_version, operation, "
+        "target_path, candidate, confidence, rationale. The candidate value must be one "
+        "of the strings in allowed_candidates. Do not use selected_candidate or any other "
+        "field name.\n"
+        + request_json
     )
 
 
@@ -302,6 +311,18 @@ def _gemini_output_text(response: dict[str, Any]) -> str:
     if not text:
         raise ProviderRequestError("Google provider returned an empty structured candidate")
     return text
+
+
+def _validated_response_text(text: str) -> AmbiguityResponse:
+    """Validate the first provider JSON object against the non-executable contract."""
+
+    try:
+        decoded, _ = json.JSONDecoder().raw_decode(text.strip())
+    except json.JSONDecodeError as error:
+        raise ProviderRequestError("model provider returned invalid response JSON") from error
+    if not isinstance(decoded, dict):
+        raise ProviderRequestError("model provider returned a non-object response")
+    return AmbiguityResponse.model_validate(decoded)
 
 
 def _openai_output_text(response: dict[str, Any]) -> str:

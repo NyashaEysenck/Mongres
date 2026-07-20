@@ -5,6 +5,7 @@
 //! a `PostgreSQL` SQLSTATE response.
 
 use std::{
+    collections::BTreeMap,
     env,
     fmt::Debug,
     sync::{Arc, Mutex},
@@ -21,10 +22,12 @@ use mongo_pg_mongo_executor::{
 };
 use mongo_pg_resolver_client::{ResolverClient, ResolverClientConfig};
 use mongo_pg_schema_discovery::{
-    CollectionProfiles, SchemaProfile, load_required_persisted_profiles, validated_collection_names,
+    CollectionProfiles, FieldPath, ObservedShape, ObservedType, SchemaProfile,
+    load_required_persisted_profiles, validated_collection_names,
 };
 use mongo_pg_sql_engine::{
-    Projection, SelectPlan, SqlValue, StatementPlan, bind_parameters, parse_sql_for_profiles,
+    Predicate, Projection, SelectPlan, SqlValue, StatementPlan, bind_parameters,
+    parse_sql_for_profiles,
 };
 use mongodb::{
     Database,
@@ -40,7 +43,7 @@ use pgwire::{
             DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat,
             FieldInfo, QueryResponse, Response, Tag,
         },
-        stmt::{NoopQueryParser, StoredStatement},
+        stmt::{QueryParser, StoredStatement},
     },
     error::{ErrorInfo, PgWireError, PgWireResult},
     messages::PgWireBackendMessage,
@@ -177,6 +180,19 @@ fn parse_configured_collection_names(
         .map_err(|error| dependency_error("validate configured MongoDB collections", &error))
 }
 
+fn is_catalog_or_session_query(query: &str) -> bool {
+    let normalized = query.trim().trim_end_matches(';').to_ascii_lowercase();
+    normalized == "select 1"
+        || normalized.contains("current_database()")
+        || normalized.contains("current_schema()")
+        || normalized.contains("version()")
+        || normalized.starts_with("show server_version")
+        || normalized.contains("information_schema.tables")
+        || normalized.contains("information_schema.columns")
+        || normalized.contains("pg_catalog.pg_tables")
+        || normalized.contains("pg_catalog.pg_class")
+}
+
 fn required_environment(name: &str) -> Result<String, ProxyError> {
     env::var(name).map_err(|_| {
         ProxyError::new(
@@ -236,6 +252,26 @@ struct ProxyBackend {
     audit_records: Mutex<Vec<AmbiguityAuditRecord>>,
 }
 
+#[derive(Debug, Clone)]
+struct PreparedStatement {
+    sql: String,
+    parameter_types: Vec<Type>,
+}
+
+#[derive(Debug)]
+struct ProxyQueryParser {
+    profiles: CollectionProfiles,
+}
+
+#[async_trait]
+impl QueryParser for ProxyQueryParser {
+    type Statement = PreparedStatement;
+
+    async fn parse_sql(&self, sql: &str, types: &[Type]) -> PgWireResult<Self::Statement> {
+        prepare_statement(sql, types, &self.profiles).map_err(proxy_error_to_pgwire)
+    }
+}
+
 impl ProxyBackend {
     fn new(
         database: Database,
@@ -270,11 +306,15 @@ impl ProxyBackend {
         query: &str,
         parameters: &[SqlValue],
     ) -> Result<ExecutionResult, ProxyError> {
-        if self.catalog_or_session_query(query).is_some() {
-            return Err(ProxyError::new(
-                ErrorKind::InvalidInput,
-                "prepared statement parameters are not allowed for catalog or session queries",
-            ));
+        if let Some(result) = self.catalog_or_session_query(query) {
+            return if parameters.is_empty() {
+                Ok(result)
+            } else {
+                Err(ProxyError::new(
+                    ErrorKind::InvalidInput,
+                    "prepared statement parameters are not allowed for catalog or session queries",
+                ))
+            };
         }
 
         let plan = parse_sql_for_profiles(query, &self.profiles)?;
@@ -569,6 +609,283 @@ impl ProxyBackend {
     }
 }
 
+fn infer_parameter_types(
+    plan: &StatementPlan,
+    schema: &SchemaProfile,
+) -> Result<Vec<Type>, ProxyError> {
+    let mut types = BTreeMap::<usize, Type>::new();
+    match plan {
+        StatementPlan::Select(plan) => {
+            if let Some(predicate) = &plan.filter {
+                collect_predicate_parameter_types(predicate, schema, &mut types)?;
+            }
+        }
+        StatementPlan::Insert(plan) => {
+            for row in &plan.rows {
+                for (path, value) in plan.columns.iter().zip(row) {
+                    collect_value_parameter_type(path, value, schema, &mut types)?;
+                }
+            }
+        }
+        StatementPlan::Update(plan) => {
+            for assignment in &plan.assignments {
+                collect_value_parameter_type(
+                    &assignment.path,
+                    &assignment.value,
+                    schema,
+                    &mut types,
+                )?;
+            }
+            collect_predicate_parameter_types(&plan.filter, schema, &mut types)?;
+        }
+        StatementPlan::Delete(plan) => {
+            collect_predicate_parameter_types(&plan.filter, schema, &mut types)?;
+        }
+    }
+
+    let Some(maximum_index) = types.keys().next_back().copied() else {
+        return Ok(Vec::new());
+    };
+    (1..=maximum_index)
+        .map(|index| {
+            types.get(&index).cloned().ok_or_else(|| {
+                ProxyError::new(
+                    ErrorKind::InvalidInput,
+                    format!("prepared-statement placeholder ${index} has no type context"),
+                )
+            })
+        })
+        .collect()
+}
+
+fn prepare_statement(
+    query: &str,
+    requested_types: &[Type],
+    profiles: &CollectionProfiles,
+) -> Result<PreparedStatement, ProxyError> {
+    if is_catalog_or_session_query(query) {
+        return if requested_types.is_empty() {
+            Ok(PreparedStatement {
+                sql: query.to_owned(),
+                parameter_types: Vec::new(),
+            })
+        } else {
+            Err(ProxyError::new(
+                ErrorKind::InvalidInput,
+                "prepared statement parameters are not allowed for catalog or session queries",
+            ))
+        };
+    }
+
+    let plan = parse_sql_for_profiles(query, profiles)?;
+    let schema = schema_for_plan_from_profiles(&plan, profiles)?;
+    let inferred_types = infer_parameter_types(&plan, schema)?;
+    let parameter_types = reconcile_parameter_types(requested_types, &inferred_types)?;
+    Ok(PreparedStatement {
+        sql: query.to_owned(),
+        parameter_types,
+    })
+}
+
+fn schema_for_plan_from_profiles<'a>(
+    plan: &StatementPlan,
+    profiles: &'a CollectionProfiles,
+) -> Result<&'a SchemaProfile, ProxyError> {
+    let collection = collection_from_plan(plan);
+    profiles.get(collection).ok_or_else(|| {
+        ProxyError::new(
+            ErrorKind::InvalidInput,
+            format!("collection '{collection}' is not in the configured collection allowlist"),
+        )
+    })
+}
+
+fn collect_predicate_parameter_types(
+    predicate: &Predicate,
+    schema: &SchemaProfile,
+    types: &mut BTreeMap<usize, Type>,
+) -> Result<(), ProxyError> {
+    match predicate {
+        Predicate::Compare { path, value, .. } => {
+            collect_value_parameter_type(path, value, schema, types)
+        }
+        Predicate::In { path, values, .. } => values
+            .iter()
+            .try_for_each(|value| collect_value_parameter_type(path, value, schema, types)),
+        Predicate::IsNull { .. } => Ok(()),
+        Predicate::And(predicates) | Predicate::Or(predicates) => predicates
+            .iter()
+            .try_for_each(|predicate| collect_predicate_parameter_types(predicate, schema, types)),
+    }
+}
+
+fn collect_value_parameter_type(
+    path: &FieldPath,
+    value: &SqlValue,
+    schema: &SchemaProfile,
+    types: &mut BTreeMap<usize, Type>,
+) -> Result<(), ProxyError> {
+    let SqlValue::Placeholder(placeholder) = value else {
+        return Ok(());
+    };
+    let index = parse_placeholder_index(placeholder)?;
+    let parameter_type = infer_field_parameter_type(path, schema)?;
+    if let Some(existing) = types.insert(index, parameter_type.clone()) {
+        if existing != parameter_type {
+            return Err(ProxyError::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "prepared-statement placeholder {placeholder} is used with incompatible field types"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn infer_field_parameter_type(
+    path: &FieldPath,
+    schema: &SchemaProfile,
+) -> Result<Type, ProxyError> {
+    let profile = schema.field(path).ok_or_else(|| {
+        ProxyError::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "field '{}' is not present in the active schema profile",
+                path.display_name()
+            ),
+        )
+    })?;
+    let non_null_types = profile
+        .observed_types
+        .iter()
+        .copied()
+        .filter(|observed_type| *observed_type != ObservedType::Null)
+        .collect::<Vec<_>>();
+    if profile.has_dotted_key_collision
+        || profile.observed_shapes != [ObservedShape::Scalar].into()
+        || non_null_types.len() != 1
+    {
+        return Err(ProxyError::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "cannot infer a safe prepared-statement type for ambiguous field '{}'",
+                path.display_name()
+            ),
+        ));
+    }
+    match non_null_types[0] {
+        ObservedType::Boolean => Ok(Type::BOOL),
+        ObservedType::Integer => Ok(Type::INT8),
+        ObservedType::FloatingPoint => Ok(Type::FLOAT8),
+        ObservedType::String => Ok(Type::TEXT),
+        ObservedType::Null
+        | ObservedType::DateTime
+        | ObservedType::ObjectId
+        | ObservedType::Document
+        | ObservedType::Array => Err(ProxyError::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "prepared-statement parameters are not supported for field '{}' with inferred BSON type '{}'",
+                path.display_name(),
+                observed_type_name(non_null_types[0])
+            ),
+        )),
+    }
+}
+
+fn reconcile_parameter_types(
+    requested_types: &[Type],
+    inferred_types: &[Type],
+) -> Result<Vec<Type>, ProxyError> {
+    if requested_types.is_empty() {
+        return Ok(inferred_types.to_vec());
+    }
+    if requested_types.len() != inferred_types.len() {
+        return Err(ProxyError::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "prepared statement declares {} parameter type(s) but SQL requires {}",
+                requested_types.len(),
+                inferred_types.len()
+            ),
+        ));
+    }
+    requested_types
+        .iter()
+        .zip(inferred_types)
+        .enumerate()
+        .map(|(index, (requested, inferred))| {
+            if *requested == Type::UNKNOWN {
+                return Ok(inferred.clone());
+            }
+            if compatible_parameter_type(requested, inferred) {
+                Ok(requested.clone())
+            } else {
+                Err(ProxyError::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "prepared statement parameter ${} declares PostgreSQL type '{}' but schema requires '{}'",
+                        index + 1,
+                        requested.name(),
+                        inferred.name()
+                    ),
+                ))
+            }
+        })
+        .collect()
+}
+
+fn compatible_parameter_type(requested: &Type, inferred: &Type) -> bool {
+    match *inferred {
+        Type::BOOL => *requested == Type::BOOL,
+        Type::INT8 => matches!(*requested, Type::INT2 | Type::INT4 | Type::INT8),
+        Type::FLOAT8 => matches!(*requested, Type::FLOAT4 | Type::FLOAT8),
+        Type::TEXT => matches!(*requested, Type::TEXT | Type::VARCHAR | Type::BPCHAR),
+        _ => requested == inferred,
+    }
+}
+
+fn parse_placeholder_index(placeholder: &str) -> Result<usize, ProxyError> {
+    let Some(index) = placeholder.strip_prefix('$') else {
+        return Err(ProxyError::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "unsupported prepared-statement placeholder '{placeholder}'; use PostgreSQL $n placeholders"
+            ),
+        ));
+    };
+    let index = index.parse::<usize>().map_err(|_| {
+        ProxyError::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "invalid prepared-statement placeholder '{placeholder}'; expected $ followed by a positive integer"
+            ),
+        )
+    })?;
+    if index == 0 {
+        return Err(ProxyError::new(
+            ErrorKind::InvalidInput,
+            "prepared-statement placeholder indexes start at $1",
+        ));
+    }
+    Ok(index)
+}
+
+fn observed_type_name(observed_type: ObservedType) -> &'static str {
+    match observed_type {
+        ObservedType::Null => "null",
+        ObservedType::Boolean => "boolean",
+        ObservedType::Integer => "integer",
+        ObservedType::FloatingPoint => "floating-point",
+        ObservedType::String => "string",
+        ObservedType::DateTime => "datetime",
+        ObservedType::ObjectId => "object-id",
+        ObservedType::Document => "document",
+        ObservedType::Array => "array",
+    }
+}
+
 #[derive(Debug, Clone)]
 struct WireField {
     name: String,
@@ -705,25 +1022,12 @@ fn bson_to_wire_value(value: &Bson, sql_type: SqlType) -> WireValue {
     }
 }
 
-fn response_from_result<'a>(
-    result: ExecutionResult,
-    format: &Format,
-) -> PgWireResult<Response<'a>> {
+fn response_from_result<'a>(result: ExecutionResult, format: &Format) -> Response<'a> {
     match result {
-        ExecutionResult::Command(command) => Ok(Response::Execution(
-            Tag::new(command.tag).with_rows(command.rows),
-        )),
+        ExecutionResult::Command(command) => {
+            Response::Execution(Tag::new(command.tag).with_rows(command.rows))
+        }
         ExecutionResult::Query { fields, rows } => {
-            if fields
-                .iter()
-                .enumerate()
-                .any(|(index, _)| format.is_binary(index))
-            {
-                return Err(proxy_error_to_pgwire(ProxyError::new(
-                    ErrorKind::FeatureNotSupported,
-                    "binary result encoding is not implemented; request PostgreSQL text results",
-                )));
-            }
             let schema: Arc<Vec<FieldInfo>> = Arc::new(
                 fields
                     .iter()
@@ -745,7 +1049,7 @@ fn response_from_result<'a>(
                 }
                 encoder.finish()
             });
-            Ok(Response::Query(QueryResponse::new(schema, row_stream)))
+            Response::Query(QueryResponse::new(schema, row_stream))
         }
     }
 }
@@ -801,18 +1105,20 @@ impl SimpleQueryHandler for ProxyBackend {
         self.execute(query)
             .await
             .map_err(proxy_error_to_pgwire)
-            .and_then(|result| response_from_result(result, &Format::UnifiedText))
+            .map(|result| response_from_result(result, &Format::UnifiedText))
             .map(|response| vec![response])
     }
 }
 
 #[async_trait]
 impl ExtendedQueryHandler for ProxyBackend {
-    type Statement = String;
-    type QueryParser = NoopQueryParser;
+    type Statement = PreparedStatement;
+    type QueryParser = ProxyQueryParser;
 
     fn query_parser(&self) -> Arc<Self::QueryParser> {
-        Arc::new(NoopQueryParser::new())
+        Arc::new(ProxyQueryParser {
+            profiles: self.profiles.clone(),
+        })
     }
 
     async fn do_query<'a, C>(
@@ -825,10 +1131,10 @@ impl ExtendedQueryHandler for ProxyBackend {
         C: ClientInfo + Unpin + Send + Sync,
     {
         let parameters = portal_parameters(portal).map_err(proxy_error_to_pgwire)?;
-        self.execute_bound(&portal.statement.statement, &parameters)
+        self.execute_bound(&portal.statement.statement.sql, &parameters)
             .await
             .map_err(proxy_error_to_pgwire)
-            .and_then(|result| response_from_result(result, &portal.result_column_format))
+            .map(|result| response_from_result(result, &portal.result_column_format))
     }
 
     async fn do_describe_statement<C>(
@@ -839,11 +1145,11 @@ impl ExtendedQueryHandler for ProxyBackend {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        self.describe(&statement.statement)
+        self.describe(&statement.statement.sql)
             .map_err(proxy_error_to_pgwire)
             .map(|fields| {
                 DescribeStatementResponse::new(
-                    statement.parameter_types.clone(),
+                    statement.statement.parameter_types.clone(),
                     fields
                         .into_iter()
                         .map(|field| field.field_info(FieldFormat::Text))
@@ -860,7 +1166,7 @@ impl ExtendedQueryHandler for ProxyBackend {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        self.describe(&portal.statement.statement)
+        self.describe(&portal.statement.statement.sql)
             .map_err(proxy_error_to_pgwire)
             .map(|fields| {
                 DescribePortalResponse::new(
@@ -876,14 +1182,15 @@ impl ExtendedQueryHandler for ProxyBackend {
     }
 }
 
-fn portal_parameters(portal: &Portal<String>) -> Result<Vec<SqlValue>, ProxyError> {
-    if portal.parameter_len() != portal.statement.parameter_types.len() {
+fn portal_parameters(portal: &Portal<PreparedStatement>) -> Result<Vec<SqlValue>, ProxyError> {
+    let parameter_types = &portal.statement.statement.parameter_types;
+    if portal.parameter_len() != parameter_types.len() {
         return Err(ProxyError::new(
             ErrorKind::InvalidInput,
             format!(
                 "prepared statement supplies {} values but declares {} parameter types; explicit supported PostgreSQL OIDs are required",
                 portal.parameter_len(),
-                portal.statement.parameter_types.len()
+                parameter_types.len()
             ),
         ));
     }
@@ -891,7 +1198,7 @@ fn portal_parameters(portal: &Portal<String>) -> Result<Vec<SqlValue>, ProxyErro
     portal
         .parameters
         .iter()
-        .zip(&portal.statement.parameter_types)
+        .zip(parameter_types)
         .enumerate()
         .map(|(index, (value, parameter_type))| {
             let format = parameters::parameter_format(&portal.parameter_format, index)?;

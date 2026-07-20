@@ -78,11 +78,11 @@ VALUES ('Amina', 'Harare');
 
 ## Run the constrained resolver
 
-The resolver has no MongoDB access and returns only a typed recommendation. It
-is optional for clear writes, but currently required when the schema marks a
-write as a sampled-missing nested-path ambiguity. The
-[requirements-alignment plan](docs/REQUIREMENTS_ALIGNMENT_PLAN.md) adds the
-Rust-owned, LLM-selected mixed-type candidate required by the final demo.
+The resolver has no MongoDB access and returns only a typed candidate ID. It is
+optional for clear writes. For the mixed-scalar `status` demo, it selects from
+Rust-generated candidates; Rust validates the selection and performs the fixed
+lossless conversion (if selected). It cannot provide MongoDB syntax or an
+execution strategy.
 
 ```bash
 python3 -m venv /tmp/mongo-pg-resolver-venv

@@ -10,6 +10,10 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .venv/
+*.egg-info/
+
+# OS/editor metadata.
+.DS_Store
 
 # Local MongoDB data volumes, if a developer adds one to Compose.
 /docker-data/

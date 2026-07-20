@@ -17,7 +17,10 @@ mongo-pg-schema-discovery = { path = "../schema-discovery" }
 mongo-pg-sql-engine = { path = "../sql-engine" }
 mongodb = "3.3"
 pgwire = "0.25"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+
+[dev-dependencies]
+tokio-postgres = "0.7"
 
 [lints]
 workspace = true
