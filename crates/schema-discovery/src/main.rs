@@ -53,7 +53,7 @@ fn parse_configured_collections(
     configured_list: Option<&str>,
     legacy_collection: Option<&str>,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let configured = match configured_list {
+    let configured = match configured_list.filter(|value| !value.trim().is_empty()) {
         Some(value) => value
             .split(',')
             .map(str::trim)
@@ -99,6 +99,13 @@ mod tests {
     fn legacy_single_collection_is_supported_for_existing_deployments() {
         let result = parse_configured_collections(None, Some("customers"))
             .expect("legacy configuration should parse");
+        assert_eq!(result, vec!["customers"]);
+    }
+
+    #[test]
+    fn empty_collection_list_falls_back_to_the_legacy_collection() {
+        let result = parse_configured_collections(Some(""), Some("customers"))
+            .expect("empty list should use the legacy collection");
         assert_eq!(result, vec!["customers"]);
     }
 }

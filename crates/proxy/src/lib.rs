@@ -297,7 +297,10 @@ impl ProxyBackend {
             return Ok(result);
         }
 
-        let plan = parse_sql_for_profiles(query, &self.profiles)?;
+        let plan = parse_sql_for_profiles(query, &self.profiles).map_err(|error| {
+            log_rejected_client_statement(query, &error);
+            error
+        })?;
         self.execute_plan(plan).await
     }
 
@@ -317,7 +320,10 @@ impl ProxyBackend {
             };
         }
 
-        let plan = parse_sql_for_profiles(query, &self.profiles)?;
+        let plan = parse_sql_for_profiles(query, &self.profiles).map_err(|error| {
+            log_rejected_client_statement(query, &error);
+            error
+        })?;
         let schema = self.schema_for_plan(&plan)?;
         let plan = bind_parameters(plan, parameters, schema)?;
         self.execute_plan(plan).await
@@ -367,7 +373,10 @@ impl ProxyBackend {
         if let Some(result) = self.catalog_or_session_query(query) {
             return Ok(result.fields());
         }
-        match parse_sql_for_profiles(query, &self.profiles)? {
+        match parse_sql_for_profiles(query, &self.profiles).map_err(|error| {
+            log_rejected_client_statement(query, &error);
+            error
+        })? {
             StatementPlan::Select(plan) => {
                 let catalog = self.catalog_for_collection(&plan.collection)?;
                 Ok(Self::select_fields(&plan, catalog))
@@ -607,6 +616,56 @@ impl ProxyBackend {
                 .collect(),
         )
     }
+}
+
+/// Emits the SQL shape needed for client-compatibility work without retaining
+/// SQL string-literal contents. This is diagnostic output only: it never
+/// changes parsing, authorization, or execution.
+fn log_rejected_client_statement(query: &str, error: &ProxyError) {
+    eprintln!(
+        "rejected PostgreSQL client statement: sql={} error={}",
+        redact_sql_literals(query),
+        error.message
+    );
+}
+
+fn redact_sql_literals(query: &str) -> String {
+    const MAX_DIAGNOSTIC_LENGTH: usize = 1_024;
+
+    let mut redacted = String::with_capacity(query.len().min(MAX_DIAGNOSTIC_LENGTH));
+    let mut characters = query.chars().peekable();
+    let mut in_string = false;
+
+    while let Some(character) = characters.next() {
+        if in_string {
+            if character == '\'' {
+                if characters.peek() == Some(&'\'') {
+                    characters.next();
+                    continue;
+                }
+                in_string = false;
+                redacted.push('\'');
+            }
+            continue;
+        }
+
+        if character == '\'' {
+            in_string = true;
+            redacted.push_str("'<redacted>");
+        } else {
+            redacted.push(character);
+        }
+
+        if redacted.len() >= MAX_DIAGNOSTIC_LENGTH {
+            redacted.push_str("…");
+            break;
+        }
+    }
+
+    if in_string {
+        redacted.push('\'');
+    }
+    redacted
 }
 
 fn infer_parameter_types(
@@ -1218,7 +1277,7 @@ mod tests {
 
     use super::{
         ExecutionResult, ProxyBackend, WireValue, bson_to_wire_value,
-        parse_configured_collection_names,
+        parse_configured_collection_names, redact_sql_literals,
     };
 
     fn document(fields: impl IntoIterator<Item = (&'static str, SampleValue)>) -> SampleDocument {
@@ -1226,6 +1285,18 @@ mod tests {
             .into_iter()
             .map(|(name, value)| (name.to_owned(), value))
             .collect::<BTreeMap<_, _>>()
+    }
+
+    #[test]
+    fn diagnostic_sql_redacts_single_quoted_literals() {
+        assert_eq!(
+            redact_sql_literals("SET application_name = 'DBeaver'"),
+            "SET application_name = '<redacted>'"
+        );
+        assert_eq!(
+            redact_sql_literals("SELECT 'secret''value' FROM customers"),
+            "SELECT '<redacted>' FROM customers"
+        );
     }
 
     fn resolver_client() -> ResolverClient {
