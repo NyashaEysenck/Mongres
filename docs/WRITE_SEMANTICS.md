@@ -1,6 +1,7 @@
 # Deterministic Write Semantics
 
-This document defines how the proxy handles supported SQL writes before the PostgreSQL wire layer is added.
+This document defines how the proxy handles supported SQL writes through the
+PostgreSQL wire layer.
 
 ## Translation contract
 
@@ -13,7 +14,7 @@ This document defines how the proxy handles supported SQL writes before the Post
 ## Values and field paths
 
 - SQL `NULL`, boolean, integer, floating-point, and string literals map directly to BSON equivalents without implicit string-to-number or number-to-string coercion.
-- Prepared-statement placeholders are rejected until the PostgreSQL protocol layer provides typed parameter binding.
+- PostgreSQL `$1`, `$2`, and later positional placeholders are supported through typed protocol binding when the schema provides an unambiguous compatible scalar type. Unsupported parameter OIDs and ambiguous field types are rejected.
 - Literal dotted MongoDB keys are rejected by `find` and write execution until an explicitly validated aggregation implementation is added.
 - Duplicate or parent/child-overlapping write paths, such as `profile` and `profile.city`, are rejected before MongoDB is called.
 - Paths with operator-like segments beginning with `$` are rejected for updates.
@@ -24,7 +25,7 @@ This document defines how the proxy handles supported SQL writes before the Post
 - `UPDATE` reports MongoDB's `matched_count` and `modified_count` separately.
 - `DELETE` reports MongoDB's `deleted_count`.
 - MongoDB write failures become structured proxy database errors. Their messages state that a write may have partially applied and callers must inspect state before manually retrying.
-- The PostgreSQL wire layer will map these proxy errors to PostgreSQL error frames and SQLSTATEs; it must not convert an error into a successful command completion.
+- The PostgreSQL wire layer maps these proxy errors to PostgreSQL error frames and SQLSTATEs; it does not convert an error into a successful command completion.
 
 ## Retry and acknowledgement policy
 
@@ -38,4 +39,3 @@ This document defines how the proxy handles supported SQL writes before the Post
 - MongoDB guarantees atomicity per document, not for an arbitrary multi-document SQL update or delete.
 - The initial executor does not expose transaction control or distributed rollback.
 - Partial bulk-write count details are preserved in the underlying MongoDB error text only; richer diagnostic fields will be added with the PostgreSQL error encoder.
-

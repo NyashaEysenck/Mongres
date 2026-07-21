@@ -1,20 +1,4 @@
 services:
-  mongodb:
-    image: mongo:8.0
-    container_name: mongo-pg-proxy-mongodb
-    ports:
-      - "27017:27017"
-    environment:
-      MONGO_INITDB_DATABASE: demo
-    volumes:
-      - ./docker/mongodb/seed.js:/docker-entrypoint-initdb.d/seed.js:ro
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-      start_period: 5s
-
   ambiguity-resolver:
     build:
       context: .
@@ -50,15 +34,12 @@ services:
       context: .
       dockerfile: docker/proxy/Dockerfile
     environment:
-      MONGO_URI: mongodb://mongodb:27017
-      MONGO_DATABASE: ${MONGO_DATABASE:-demo}
+      MONGO_URI: ${MONGO_URI:-mongodb://host.docker.internal:27017}
+      MONGO_DATABASE: ${MONGO_DATABASE:?set MONGO_DATABASE in .env}
       MONGO_COLLECTIONS: ${MONGO_COLLECTIONS-}
       MONGO_COLLECTION: ${MONGO_COLLECTION:-customers}
       MONGO_SAMPLE_SIZE: ${MONGO_SAMPLE_SIZE:-100}
     command: ["mongo-pg-schema-discovery"]
-    depends_on:
-      mongodb:
-        condition: service_healthy
     restart: "no"
 
   proxy:
@@ -67,8 +48,8 @@ services:
       dockerfile: docker/proxy/Dockerfile
     container_name: mongo-pg-proxy
     environment:
-      MONGO_URI: mongodb://mongodb:27017
-      MONGO_DATABASE: ${MONGO_DATABASE:-demo}
+      MONGO_URI: ${MONGO_URI:-mongodb://host.docker.internal:27017}
+      MONGO_DATABASE: ${MONGO_DATABASE:?set MONGO_DATABASE in .env}
       MONGO_COLLECTIONS: ${MONGO_COLLECTIONS-}
       MONGO_COLLECTION: ${MONGO_COLLECTION:-customers}
       PROXY_LISTEN_ADDR: 0.0.0.0:5433
@@ -81,14 +62,12 @@ services:
     ports:
       - "5433:5433"
     depends_on:
-      mongodb:
-        condition: service_healthy
       schema-discovery:
         condition: service_completed_successfully
       ambiguity-resolver:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready --host 127.0.0.1 --port 5433 --dbname demo --quiet"]
+      test: ["CMD-SHELL", "pg_isready --host 127.0.0.1 --port 5433 --dbname mongo --quiet"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -98,5 +77,5 @@ services:
 
   psql:
     image: postgres:16-alpine
-    profiles: ["demo"]
+    profiles: ["tools"]
     entrypoint: ["psql"]
