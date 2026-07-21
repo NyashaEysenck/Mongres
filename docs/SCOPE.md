@@ -41,9 +41,11 @@ The write-time ambiguity gate covers:
 - Coercions where multiple target types are plausible.
 
 The gate detects every listed condition. The first required resolved case is a
-mixed scalar type assignment: the LLM selects one Rust-generated, lossless
-candidate such as `keep_string`, `parse_integer_losslessly`, or `reject`.
-Rust validates the candidate and performs the conversion before its normal
+mixed scalar type assignment: the LLM selects one Rust-generated candidate.
+For a quoted SQL string, candidates are `keep_string`,
+`parse_integer_losslessly`, or `reject`. For an unquoted SQL integer,
+candidates are `keep_integer`, `format_integer_as_string`, or `reject`. Rust
+validates the candidate and performs any conversion before its normal
 deterministic `$set`. Mixed shapes and literal dotted-key collisions remain
 reject-only until each has its own deterministic execution primitive. The
 Python LLM service receives minimized schema evidence, the proposed write, and

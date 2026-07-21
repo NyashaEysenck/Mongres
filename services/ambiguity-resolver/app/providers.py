@@ -71,7 +71,10 @@ class DeterministicAdvisor:
     """A side-effect-free fallback for local contract development only."""
 
     def recommend(self, request: AmbiguityRequest) -> AmbiguityResponse:
-        if ResolutionCandidate.PARSE_INTEGER_LOSSLESSLY in request.allowed_candidates:
+        if ResolutionCandidate.KEEP_INTEGER in request.allowed_candidates:
+            candidate = ResolutionCandidate.KEEP_INTEGER
+            rationale = "Rust supplied a native integer candidate for this mixed scalar field."
+        elif ResolutionCandidate.PARSE_INTEGER_LOSSLESSLY in request.allowed_candidates:
             candidate = ResolutionCandidate.PARSE_INTEGER_LOSSLESSLY
             rationale = "Rust supplied a lossless integer candidate for this mixed scalar field."
         elif ResolutionCandidate.KEEP_STRING in request.allowed_candidates:
@@ -196,10 +199,12 @@ def _prompt(request: AmbiguityRequest) -> str:
         "of the strings in allowed_candidates. The confidence value must be a JSON number "
         "between 0 and 1, not a string label. Do not use selected_candidate or any other "
         "field name. Keep rationale at or below 300 characters. Candidate semantics: "
-        "keep_string preserves only the incoming write "
-        "value as BSON string; parse_integer_losslessly converts only the incoming write "
-        "value to BSON integer after Rust has proven the conversion is lossless; neither "
-        "candidate rewrites existing documents. If you select a non-reject candidate, "
+        "keep_string preserves only an incoming SQL string as BSON string; "
+        "parse_integer_losslessly converts only a canonical integer SQL string to BSON integer; "
+        "keep_integer preserves only an incoming SQL integer as BSON integer; "
+        "format_integer_as_string converts only an incoming SQL integer to its canonical BSON "
+        "string form. Rust has already proven every offered candidate is executable for this "
+        "exact write; no candidate rewrites existing documents. If you select a non-reject candidate, "
         "confidence must be at least 0.8 because the proxy will fail closed below that "
         "threshold; select reject instead when you cannot reach that confidence. Use "
         "write_value.value_preview only to understand the incoming assignment value; do "
@@ -235,6 +240,8 @@ def _response_schema() -> dict[str, Any]:
                 "enum": [
                     "keep_string",
                     "parse_integer_losslessly",
+                    "keep_integer",
+                    "format_integer_as_string",
                     "use_nested_path",
                     "reject",
                 ],
@@ -268,6 +275,8 @@ def _gemini_response_schema() -> dict[str, Any]:
                 "enum": [
                     "keep_string",
                     "parse_integer_losslessly",
+                    "keep_integer",
+                    "format_integer_as_string",
                     "use_nested_path",
                     "reject",
                 ],

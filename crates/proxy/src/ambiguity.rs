@@ -176,6 +176,8 @@ fn has_executable_candidate(candidates: &BTreeSet<ResolutionCandidate>) -> bool 
             ResolutionCandidate::UseNestedPath
                 | ResolutionCandidate::KeepString
                 | ResolutionCandidate::ParseIntegerLosslessly
+                | ResolutionCandidate::KeepInteger
+                | ResolutionCandidate::FormatIntegerAsString
         )
     })
 }

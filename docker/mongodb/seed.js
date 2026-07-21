@@ -41,9 +41,9 @@ database.ambiguous_profiles.insertMany([
   },
 ]);
 
-// Deliberately mixed scalar BSON types only. This is the bounded Phase-C
-// fixture: an LLM may choose one Rust-generated candidate for a string SQL
-// literal, while Rust performs the selected deterministic conversion.
+// Deliberately mixed scalar BSON types only. The demo writes an unquoted SQL
+// integer and lets the LLM select only a Rust-generated integer representation
+// candidate; Rust performs the selected deterministic conversion.
 database.mixed_statuses.insertMany([
   { _id: "status-001", status: "active" },
   { _id: "status-002", status: 1 },

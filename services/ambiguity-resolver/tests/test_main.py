@@ -59,6 +59,17 @@ class ResolverContractTests(unittest.TestCase):
             request.allowed_candidates,
         )
 
+        integer_request = request.model_copy(
+            update={
+                "allowed_candidates": [
+                    ResolutionCandidate.KEEP_INTEGER,
+                    ResolutionCandidate.FORMAT_INTEGER_AS_STRING,
+                    ResolutionCandidate.REJECT,
+                ]
+            }
+        )
+        self.assertIn(ResolutionCandidate.KEEP_INTEGER, integer_request.allowed_candidates)
+
         with self.assertRaises(ValidationError):
             AmbiguityRequest(
                 schema_profile_version=7,

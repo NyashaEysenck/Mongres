@@ -1306,7 +1306,7 @@ mod tests {
         );
 
         let error = backend
-            .execute("UPDATE customers SET status = 2 WHERE name = 'Amina'")
+            .execute("UPDATE customers SET status = true WHERE name = 'Amina'")
             .await
             .expect_err("ambiguous write must not reach MongoDB");
         assert_eq!(error.kind, ErrorKind::AmbiguousWrite);

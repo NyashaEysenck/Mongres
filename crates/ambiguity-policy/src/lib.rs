@@ -59,6 +59,10 @@ pub enum ResolutionCandidate {
     KeepString,
     /// Convert a canonical integer string to BSON `Int64` in Rust.
     ParseIntegerLosslessly,
+    /// Leave a validated SQL integer assignment as BSON `Int64`.
+    KeepInteger,
+    /// Convert a validated SQL integer assignment to its canonical BSON string form in Rust.
+    FormatIntegerAsString,
     /// Authorize the existing deterministic nested `$set` construction.
     UseNestedPath,
     /// Stop execution before the plan reaches the executor.
@@ -157,12 +161,13 @@ pub fn detect_write_ambiguities(
 
 /// Returns the candidate IDs Rust permits for one typed write and ambiguity.
 ///
-/// The first mixed-type primitive is deliberately narrow: an exact scalar
-/// `string`/`integer` field in an `UPDATE` assignment. `KeepString` uses the
-/// existing BSON string executor path; `ParseIntegerLosslessly` retags only a
-/// canonical signed-decimal string as an `Int64` before that path executes.
-/// Shape conflicts, dotted keys, missing sampled fields, filters on the target
-/// field, and every other type combination remain reject-only.
+/// The mixed-type primitives are deliberately narrow: an exact scalar
+/// `string`/`integer` field in a one-assignment `UPDATE`. For a SQL string,
+/// Rust may retain the string or losslessly retag a canonical integer string.
+/// For a SQL integer, Rust may retain the integer or format it as its canonical
+/// string representation. Shape conflicts, dotted keys, missing sampled
+/// fields, filters on the target field, and every other type combination remain
+/// reject-only.
 #[must_use]
 pub fn allowed_candidates(
     plan: &StatementPlan,
@@ -176,11 +181,24 @@ pub fn allowed_candidates(
     if nested_path_is_safe {
         candidates.insert(ResolutionCandidate::UseNestedPath);
     }
-    if let Some(value) = mixed_type_assignment_value(plan, ambiguity) {
-        candidates.insert(ResolutionCandidate::KeepString);
-        if parse_integer_losslessly(value).is_some() {
-            candidates.insert(ResolutionCandidate::ParseIntegerLosslessly);
+    match mixed_type_assignment_value(plan, ambiguity) {
+        Some(SqlValue::String(value)) => {
+            candidates.insert(ResolutionCandidate::KeepString);
+            if parse_integer_losslessly(value).is_some() {
+                candidates.insert(ResolutionCandidate::ParseIntegerLosslessly);
+            }
         }
+        Some(SqlValue::Integer(_)) => {
+            candidates.insert(ResolutionCandidate::KeepInteger);
+            candidates.insert(ResolutionCandidate::FormatIntegerAsString);
+        }
+        Some(
+            SqlValue::Null
+            | SqlValue::Boolean(_)
+            | SqlValue::FloatingPoint(_)
+            | SqlValue::Placeholder(_),
+        )
+        | None => {}
     }
     candidates
 }
@@ -363,41 +381,29 @@ pub fn apply_resolution(
             Ok(plan.clone())
         }
         ResolutionCandidate::KeepString => {
-            mixed_type_assignment_value(
-                plan,
-                &WriteAmbiguity {
-                    field_path: resolution.field_path.clone(),
-                    kinds: BTreeSet::from([AmbiguityKind::MixedBsonTypes]),
-                    observed_types: BTreeSet::from([ObservedType::Integer, ObservedType::String]),
-                    observed_shapes: BTreeSet::from([ObservedShape::Scalar]),
-                    missing_documents: 0,
-                },
-            )
-            .ok_or_else(|| {
-                ProxyError::new(
-                    ErrorKind::AmbiguousWrite,
-                    "string-preserving candidate does not match a safe typed assignment",
-                )
-            })?;
+            mixed_type_assignment_value(plan, &mixed_type_ambiguity(&resolution.field_path))
+                .filter(|value| matches!(value, SqlValue::String(_)))
+                .ok_or_else(|| {
+                    ProxyError::new(
+                        ErrorKind::AmbiguousWrite,
+                        "string-preserving candidate does not match a safe typed assignment",
+                    )
+                })?;
             Ok(plan.clone())
         }
         ResolutionCandidate::ParseIntegerLosslessly => {
-            let value = mixed_type_assignment_value(
-                plan,
-                &WriteAmbiguity {
-                    field_path: resolution.field_path.clone(),
-                    kinds: BTreeSet::from([AmbiguityKind::MixedBsonTypes]),
-                    observed_types: BTreeSet::from([ObservedType::Integer, ObservedType::String]),
-                    observed_shapes: BTreeSet::from([ObservedShape::Scalar]),
-                    missing_documents: 0,
-                },
-            )
-            .ok_or_else(|| {
-                ProxyError::new(
-                    ErrorKind::AmbiguousWrite,
-                    "integer conversion candidate does not match a safe typed assignment",
-                )
-            })?;
+            let value =
+                mixed_type_assignment_value(plan, &mixed_type_ambiguity(&resolution.field_path))
+                    .and_then(|value| match value {
+                        SqlValue::String(value) => Some(value),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        ProxyError::new(
+                            ErrorKind::AmbiguousWrite,
+                            "integer conversion candidate does not match a safe typed assignment",
+                        )
+                    })?;
             let integer = parse_integer_losslessly(value).ok_or_else(|| {
                 ProxyError::new(
                     ErrorKind::AmbiguousWrite,
@@ -405,6 +411,32 @@ pub fn apply_resolution(
                 )
             })?;
             retype_update_assignment(plan, &resolution.field_path, integer)
+        }
+        ResolutionCandidate::KeepInteger => {
+            mixed_type_assignment_value(plan, &mixed_type_ambiguity(&resolution.field_path))
+                .filter(|value| matches!(value, SqlValue::Integer(_)))
+                .ok_or_else(|| {
+                    ProxyError::new(
+                        ErrorKind::AmbiguousWrite,
+                        "integer-preserving candidate does not match a safe typed assignment",
+                    )
+                })?;
+            Ok(plan.clone())
+        }
+        ResolutionCandidate::FormatIntegerAsString => {
+            let value =
+                mixed_type_assignment_value(plan, &mixed_type_ambiguity(&resolution.field_path))
+                    .and_then(|value| match value {
+                        SqlValue::Integer(value) => Some(*value),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        ProxyError::new(
+                            ErrorKind::AmbiguousWrite,
+                            "string formatting candidate does not match a safe typed assignment",
+                        )
+                    })?;
+            retype_update_assignment_as_string(plan, &resolution.field_path, value)
         }
     }
 }
@@ -449,7 +481,7 @@ fn write_plan_references_path(plan: &StatementPlan, target: &FieldPath) -> bool 
     }
 }
 
-/// Returns the sole string assignment eligible for the first coercion primitive.
+/// Returns the sole scalar assignment eligible for a mixed-type primitive.
 ///
 /// This is intentionally more restrictive than general SQL writes. A filter on
 /// the same mixed-type field could change which BSON values match after a
@@ -457,7 +489,7 @@ fn write_plan_references_path(plan: &StatementPlan, target: &FieldPath) -> bool 
 fn mixed_type_assignment_value<'a>(
     plan: &'a StatementPlan,
     ambiguity: &WriteAmbiguity,
-) -> Option<&'a str> {
+) -> Option<&'a SqlValue> {
     if ambiguity.kinds != BTreeSet::from([AmbiguityKind::MixedBsonTypes])
         || ambiguity.observed_types != BTreeSet::from([ObservedType::Integer, ObservedType::String])
         || ambiguity.observed_shapes != BTreeSet::from([ObservedShape::Scalar])
@@ -479,10 +511,17 @@ fn mixed_type_assignment_value<'a>(
     if assignment.path != ambiguity.field_path {
         return None;
     }
-    let SqlValue::String(value) = &assignment.value else {
-        return None;
-    };
-    Some(value)
+    Some(&assignment.value)
+}
+
+fn mixed_type_ambiguity(field_path: &FieldPath) -> WriteAmbiguity {
+    WriteAmbiguity {
+        field_path: field_path.clone(),
+        kinds: BTreeSet::from([AmbiguityKind::MixedBsonTypes]),
+        observed_types: BTreeSet::from([ObservedType::Integer, ObservedType::String]),
+        observed_shapes: BTreeSet::from([ObservedShape::Scalar]),
+        missing_documents: 0,
+    }
 }
 
 fn predicate_references_path(predicate: &Predicate, target: &FieldPath) -> bool {
@@ -532,6 +571,35 @@ fn retype_update_assignment(
 
     let mut converted = update.clone();
     converted.assignments[0].value = SqlValue::Integer(value);
+    Ok(StatementPlan::Update(converted))
+}
+
+fn retype_update_assignment_as_string(
+    plan: &StatementPlan,
+    target: &FieldPath,
+    value: i64,
+) -> Result<StatementPlan, ProxyError> {
+    let StatementPlan::Update(update) = plan else {
+        return Err(ProxyError::new(
+            ErrorKind::AmbiguousWrite,
+            "integer string formatting candidate requires an UPDATE assignment",
+        ));
+    };
+    let [assignment] = update.assignments.as_slice() else {
+        return Err(ProxyError::new(
+            ErrorKind::AmbiguousWrite,
+            "integer string formatting candidate requires exactly one assignment",
+        ));
+    };
+    if assignment.path != *target || !matches!(assignment.value, SqlValue::Integer(_)) {
+        return Err(ProxyError::new(
+            ErrorKind::AmbiguousWrite,
+            "integer string formatting candidate does not match the parsed assignment",
+        ));
+    }
+
+    let mut converted = update.clone();
+    converted.assignments[0].value = SqlValue::String(value.to_string());
     Ok(StatementPlan::Update(converted))
 }
 
@@ -628,7 +696,7 @@ mod tests {
     use super::{
         AmbiguityKind, RESOLUTION_CONTRACT_VERSION, ResolutionCandidate, ResolverResponse,
         WriteAmbiguity, WriteOperation, allowed_candidates, apply_resolution,
-        detect_write_ambiguities, resolver_request, validate_resolution,
+        detect_write_ambiguities, mixed_type_ambiguity, resolver_request, validate_resolution,
         validate_resolver_response,
     };
 
@@ -873,6 +941,54 @@ mod tests {
             panic!("candidate must preserve the UPDATE plan");
         };
         assert_eq!(converted.assignments[0].value, SqlValue::Integer(1));
+    }
+
+    #[test]
+    fn model_can_select_a_rust_owned_integer_to_string_candidate() {
+        let path = FieldPath::top_level("status");
+        let plan = StatementPlan::Update(UpdatePlan {
+            collection: "customers".to_owned(),
+            assignments: vec![AssignmentPlan {
+                path: path.clone(),
+                value: SqlValue::Integer(1),
+            }],
+            filter: Predicate::Compare {
+                path: FieldPath::top_level("_id"),
+                operator: mongo_pg_sql_engine::ComparisonOperator::Equal,
+                value: SqlValue::String("customer-1".to_owned()),
+            },
+        });
+        let ambiguity = mixed_type_ambiguity(&path);
+
+        assert_eq!(
+            allowed_candidates(&plan, &ambiguity),
+            BTreeSet::from([
+                ResolutionCandidate::KeepInteger,
+                ResolutionCandidate::FormatIntegerAsString,
+                ResolutionCandidate::Reject,
+            ])
+        );
+        let request = resolver_request(&plan, WriteOperation::Update, 9, &ambiguity);
+        let response = ResolverResponse {
+            contract_version: RESOLUTION_CONTRACT_VERSION.to_owned(),
+            schema_profile_version: 9,
+            operation: WriteOperation::Update,
+            target_path: vec!["status".to_owned()],
+            candidate: ResolutionCandidate::FormatIntegerAsString,
+            confidence: 0.95,
+            rationale: "The SQL integer can be represented as the canonical string '1'.".to_owned(),
+        };
+
+        let resolution = validate_resolver_response(&request, &plan, &ambiguity, &response, 0.9)
+            .expect("Rust-generated integer candidate should validate");
+        let converted = apply_resolution(&plan, &resolution).expect("conversion is deterministic");
+        let StatementPlan::Update(converted) = converted else {
+            panic!("candidate must preserve the UPDATE plan");
+        };
+        assert_eq!(
+            converted.assignments[0].value,
+            SqlValue::String("1".to_owned())
+        );
     }
 
     #[test]

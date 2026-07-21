@@ -61,8 +61,10 @@ type write. It proves the requested coercion/disambiguation role without
 allowing the model to invent an execution strategy.
 
 1. Extend the policy contract with Rust-generated candidate decisions for an
-   exact target field, initially `keep_string`, `parse_integer_losslessly`, and
-   `reject`. Candidate IDs are stable enums, not model-provided types.
+   exact target field: `keep_string`, `parse_integer_losslessly`,
+   `keep_integer`, `format_integer_as_string`, and `reject` where the typed
+   assignment makes each candidate safe. Candidate IDs are stable enums, not
+   model-provided types.
 2. Generate candidates only when all of these are true: the assignment targets
    one known scalar field, the schema observed the candidate BSON type, the
    SQL literal has a lossless conversion for that candidate, and no dotted-key
@@ -74,10 +76,10 @@ allowing the model to invent an execution strategy.
    then execute the existing `$set` path. No raw command, pipeline, filter, or
    coercion instruction is accepted from the resolver.
 5. Add a seeded `status` field containing both string and integer values. The
-   demo updates one explicitly selected document with an ambiguous SQL string
-   literal; the resolver selects `keep_string` or
-   `parse_integer_losslessly`, Rust performs that exact conversion, and
-   `mongosh` verifies both the value and BSON type.
+   demo updates one explicitly selected document with an unquoted SQL integer
+   literal; the resolver selects `keep_integer` or
+   `format_integer_as_string`, Rust performs that exact representation choice,
+   and `mongosh` verifies both the value and BSON type.
 6. Test accepted candidates, rejection, stale profiles, malformed IDs,
    unavailable/low-confidence responses, lossy conversion attempts, and the
    guarantee that no write occurs on failure.

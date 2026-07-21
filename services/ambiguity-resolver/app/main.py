@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI, HTTPException
 
 from .contract import (
@@ -16,6 +18,12 @@ from .contract import (
     ResolutionAdvisor,
     WriteOperation,
 )
+
+
+# Uvicorn configures this logger at INFO level in the container. Keeping the
+# decision record here makes the demo observable without creating a client API
+# or logging document values, SQL text, credentials, or executable commands.
+LOGGER = logging.getLogger("uvicorn.error")
 from .providers import (
     DeterministicAdvisor,
     ProviderConfigurationError,
@@ -57,7 +65,15 @@ def create_app(advisor: ResolutionAdvisor | None = None) -> FastAPI:
         """Return only an allowlisted recommendation; neither provider can execute MongoDB."""
 
         try:
-            return validate_recommendation(request, active_advisor.recommend(request))
+            recommendation = validate_recommendation(request, active_advisor.recommend(request))
+            LOGGER.info(
+                "ambiguity decision target_path=%s allowed_candidates=%s selected_candidate=%s confidence=%.2f",
+                ".".join(request.target_path),
+                ",".join(candidate.value for candidate in request.allowed_candidates),
+                recommendation.candidate.value,
+                recommendation.confidence,
+            )
+            return recommendation
         except ProviderConfigurationError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         except ProviderRequestError as error:

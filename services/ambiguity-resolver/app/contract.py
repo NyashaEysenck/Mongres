@@ -30,6 +30,8 @@ class ResolutionCandidate(StrEnum):
 
     KEEP_STRING = "keep_string"
     PARSE_INTEGER_LOSSLESSLY = "parse_integer_losslessly"
+    KEEP_INTEGER = "keep_integer"
+    FORMAT_INTEGER_AS_STRING = "format_integer_as_string"
     USE_NESTED_PATH = "use_nested_path"
     REJECT = "reject"
 
@@ -134,6 +136,8 @@ class AmbiguityRequest(StrictModel):
         type_candidates = {
             ResolutionCandidate.KEEP_STRING,
             ResolutionCandidate.PARSE_INTEGER_LOSSLESSLY,
+            ResolutionCandidate.KEEP_INTEGER,
+            ResolutionCandidate.FORMAT_INTEGER_AS_STRING,
         }
         if type_candidates.intersection(self.allowed_candidates) and (
             set(self.ambiguity.kinds) != {AmbiguityKind.MIXED_BSON_TYPES}
